@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: corp-postgres
+    environment:
+      POSTGRES_DB: corp_messenger
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+
+  backend:
+    build: ./backend
+    container_name: corp-backend
+    depends_on:
+      - postgres
+    environment:
+      APP_ENV: local
+      HTTP_PORT: 8080
+      LOG_LEVEL: debug
+      DB_DSN: postgres://postgres:postgres@postgres:5432/corp_messenger?sslmode=disable
+    ports:
+      - "8080:8080"
