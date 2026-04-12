@@ -1,145 +1,130 @@
-import { useEffect, useState } from 'react';
-import { StyleSheet, Button, View, ActivityIndicator, Alert } from 'react-native';
+import { useRouter } from 'expo-router';
+import dayjs from 'dayjs';
+import { useMemo, useState } from 'react';
+import { FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import MaterialIcons from '@expo/vector-icons/MaterialIcons';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { useAuth } from '@/contexts/auth-context';
-import { useHealth, useUsers } from '@/hooks/use-api';
-import { IconSymbol } from '@/components/ui/icon-symbol';
+import { getOtherParticipant, mockChats } from '@/data/mock';
+import { useThemeColor } from '@/hooks/use-theme-color';
+import { useAuthStore } from '@/store/auth';
 
-export default function HomeScreen() {
-  const { user, isAuthenticated, logout } = useAuth();
-  const { data: healthData, loading: healthLoading, error: healthError, execute: checkHealth } = useHealth();
-  const { data: users, loading: usersLoading, execute: loadUsers } = useUsers();
+export default function ChatsScreen() {
+  const currentUser = useAuthStore((s) => s.currentUser);
+  const router = useRouter();
+  const [searchQuery, setSearchQuery] = useState('');
+  const primaryColor = useThemeColor({}, 'primary');
+  const textColor = useThemeColor({}, 'text');
+  const surfaceColor = useThemeColor({}, 'surface');
+  const borderColor = useThemeColor({}, 'border');
+  const iconColor = useThemeColor({}, 'icon');
 
-  useEffect(() => {
-    checkHealth();
-  }, []);
+  const chatsForUser = useMemo(
+    () => mockChats.filter((c) => c.participantIds.includes(currentUser?.id ?? '')),
+    [currentUser?.id]
+  );
 
-  const handleLogout = async () => {
-    await logout();
-    Alert.alert('Success', 'Logged out successfully');
+  const filteredChats = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return chatsForUser;
+    return chatsForUser.filter((chat) => {
+      const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
+      return other?.username?.toLowerCase().includes(q) ?? false;
+    });
+  }, [chatsForUser, currentUser, searchQuery]);
+
+  const renderItem = ({ item: chat }: { item: (typeof filteredChats)[0] }) => {
+    const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
+    const time = dayjs(chat.updatedAt).format('HH:mm');
+    const initials = other?.name ? other.name.split(' ').map((n) => n[0]).join('').slice(0, 2) : '?';
+
+    return (
+      <Pressable
+        onPress={() => router.push(`/chat/${chat.id}`)}
+        style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}>
+        <View style={[styles.avatar, { backgroundColor: primaryColor }]}>
+          <ThemedText style={styles.avatarText}>{initials}</ThemedText>
+        </View>
+        <View style={styles.content}>
+          <View style={styles.rowTop}>
+            <ThemedText numberOfLines={1} style={styles.name}>
+              {other?.name ?? 'Чат'}
+            </ThemedText>
+            <ThemedText style={styles.time}>{time}</ThemedText>
+          </View>
+          <ThemedText numberOfLines={1} style={styles.preview}>
+            {chat.lastMessage ?? ''}
+          </ThemedText>
+        </View>
+      </Pressable>
+    );
   };
 
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <IconSymbol
-          size={200}
-          color="#808080"
-          name="bubble.left.and.bubble.right.fill"
-          style={styles.headerImage}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Corp Messenger</ThemedText>
-      </ThemedView>
-
-      <ThemedView style={styles.section}>
-        <ThemedText type="subtitle">Backend Connection</ThemedText>
-        {healthLoading ? (
-          <ActivityIndicator />
-        ) : healthError ? (
-          <ThemedText style={styles.error}>
-            Backend Status: Offline\n{healthError.message}
-          </ThemedText>
-        ) : healthData ? (
-          <ThemedText style={styles.success}>
-            Backend Status: {healthData.status}
-          </ThemedText>
-        ) : null}
-        <View style={styles.buttonContainer}>
-          <Button title="Check Health" onPress={checkHealth} />
-        </View>
-      </ThemedView>
-
-      <ThemedView style={styles.section}>
-        <ThemedText type="subtitle">Authentication</ThemedText>
-        {isAuthenticated ? (
-          <>
-            <ThemedText style={styles.success}>
-              Logged in as: {user?.first_name} {user?.last_name}
-            </ThemedText>
-            <ThemedText>Email: {user?.email}</ThemedText>
-            <View style={styles.buttonContainer}>
-              <Button title="Logout" onPress={handleLogout} color="#ff4444" />
-            </View>
-            <View style={styles.buttonContainer}>
-              <Button title="Load Users" onPress={loadUsers} />
-            </View>
-            {usersLoading ? <ActivityIndicator /> : null}
-            {users ? (
-              <ThemedText>
-                Total users: {users.length}
-              </ThemedText>
-            ) : null}
-          </>
-        ) : (
-          <>
-            <ThemedText style={styles.warning}>
-              Not logged in. Go to Login tab to authenticate.
-            </ThemedText>
-            <ThemedText>
-              Backend URL: http://localhost:8080
-            </ThemedText>
-          </>
-        )}
-      </ThemedView>
-
-      <ThemedView style={styles.section}>
-        <ThemedText type="subtitle">API Endpoints</ThemedText>
-        <ThemedText style={styles.code}>
-          POST /api/v1/auth/register{'\n'}
-          POST /api/v1/auth/login{'\n'}
-          GET  /api/v1/auth/me{'\n'}
-          GET  /api/v1/users{'\n'}
-          POST /api/v1/chats{'\n'}
-          GET  /api/v1/chats{'\n'}
-          POST /api/v1/chats/:id/messages
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <ThemedView style={styles.container}>
+        <ThemedText type="title" style={styles.header}>
+          Чаты
         </ThemedText>
+        <View style={[styles.searchRow, { backgroundColor: surfaceColor, borderColor }]}>
+          <MaterialIcons name="search" size={22} color={iconColor} style={styles.searchIcon} />
+          <TextInput
+            style={[styles.searchInput, { color: textColor }]}
+            placeholder="Поиск"
+            placeholderTextColor={iconColor}
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+        </View>
+        <FlatList
+          data={filteredChats}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={
+            <ThemedText style={styles.empty}>
+              {searchQuery.trim() ? 'Ничего не найдено' : 'Нет чатов'}
+            </ThemedText>
+          }
+        />
       </ThemedView>
-    </ParallaxScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  safe: { flex: 1 },
+  container: { flex: 1 },
+  header: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12 },
+  searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 16,
-  },
-  section: {
-    gap: 8,
-    marginBottom: 16,
-    padding: 12,
-    borderRadius: 8,
+    marginHorizontal: 20,
+    marginBottom: 12,
     borderWidth: 1,
-    borderColor: '#ccc',
+    borderRadius: 12,
+    paddingHorizontal: 12,
   },
-  headerImage: {
-    color: '#808080',
-    bottom: -50,
-    left: -35,
-    position: 'absolute',
+  searchIcon: { marginRight: 8 },
+  searchInput: { flex: 1, paddingVertical: 12, fontSize: 16 },
+  list: { paddingBottom: 24 },
+  row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14 },
+  rowPressed: { opacity: 0.7 },
+  avatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
   },
-  buttonContainer: {
-    marginVertical: 8,
-  },
-  error: {
-    color: '#ff4444',
-  },
-  success: {
-    color: '#44ff44',
-  },
-  warning: {
-    color: '#ffaa00',
-  },
-  code: {
-    fontFamily: 'monospace',
-    fontSize: 12,
-    opacity: 0.8,
-  },
+  avatarText: { color: '#fff', fontSize: 18, fontWeight: '600' },
+  content: { flex: 1, minWidth: 0 },
+  rowTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 },
+  name: { flex: 1, marginRight: 8, fontWeight: '600' },
+  time: { fontSize: 13, opacity: 0.7 },
+  preview: { fontSize: 15, opacity: 0.8 },
+  empty: { textAlign: 'center', paddingTop: 48, opacity: 0.7 },
 });
