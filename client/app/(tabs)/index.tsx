@@ -20,6 +20,7 @@ export default function ChatsScreen() {
   const surfaceColor = useThemeColor({}, 'surface');
   const borderColor = useThemeColor({}, 'border');
   const iconColor = useThemeColor({}, 'icon');
+  const bgColor = useThemeColor({}, 'background');
 
   const chatsForUser = useMemo(
     () => mockChats.filter((c) => c.participantIds.includes(currentUser?.id ?? '')),
@@ -63,7 +64,7 @@ export default function ChatsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={['top']}>
       <ThemedView style={styles.container}>
         <ThemedText type="title" style={styles.header}>
           Чаты

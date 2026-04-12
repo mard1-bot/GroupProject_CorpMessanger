@@ -36,9 +36,11 @@ export default function ProfileScreen() {
     { value: 'system', label: 'Системная' },
   ];
 
+  const bgColor = useThemeColor({}, 'background');
+
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
-      <ScrollView style={styles.scroll}>
+    <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={['top']}>
+      <ScrollView style={[styles.scroll, { backgroundColor: bgColor }]}>
         <ThemedView style={styles.container}>
           <ThemedText type="title" style={styles.header}>
             Профиль
