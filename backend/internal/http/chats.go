@@ -10,6 +10,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// isChatMember checks if userID is a member of the chat from the members list
+func isChatMember(members []*models.ChatMember, userID uuid.UUID) bool {
+	for _, m := range members {
+		if m.UserID == userID {
+			return true
+		}
+	}
+	return false
+}
+
 type CreateChatRequest struct {
 	Type        string   `json:"type"`
 	Title       string   `json:"title,omitempty"`
@@ -61,11 +71,19 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to add creator as member", "error", err)
 	}
 
+	// Validate and collect member IDs first
+	var memberIDs []uuid.UUID
 	for _, memberIDStr := range req.MemberIDs {
 		memberID, err := uuid.Parse(memberIDStr)
 		if err != nil {
-			continue
+			WriteError(w, http.StatusBadRequest, "invalid_member_id", "Invalid member ID: "+memberIDStr)
+			return
 		}
+		memberIDs = append(memberIDs, memberID)
+	}
+
+	// Add members (N+1 problem - should be batch insert in production)
+	for _, memberID := range memberIDs {
 		member := &models.ChatMember{
 			ChatID: chat.ID,
 			UserID: memberID,
@@ -73,6 +91,8 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := h.storage.AddChatMember(r.Context(), member); err != nil {
 			h.logger.Error("failed to add member", "error", err, "member_id", memberID)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to add member")
+			return
 		}
 	}
 
@@ -135,14 +155,7 @@ func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isMember := false
-	for _, m := range members {
-		if m.UserID == claims.UserID {
-			isMember = true
-			break
-		}
-	}
-	if !isMember {
+	if !isChatMember(members, claims.UserID) {
 		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
@@ -201,17 +214,15 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 
 	// Check if caller is a member and get their role
 	var callerRole string
-	isMember := false
+	if !isChatMember(members, claims.UserID) {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
 	for _, m := range members {
 		if m.UserID == claims.UserID {
-			isMember = true
 			callerRole = m.Role
 			break
 		}
-	}
-	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
-		return
 	}
 
 	// Only owner/admin can add members

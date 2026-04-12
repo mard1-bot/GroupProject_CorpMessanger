@@ -3,6 +3,8 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"corp-messenger/backend/internal/auth"
@@ -11,6 +13,9 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// emailRegex is a basic email validation pattern
+var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 
 type RegisterRequest struct {
 	Email      string `json:"email"`
@@ -40,6 +45,11 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 	if req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
 		WriteError(w, http.StatusBadRequest, "missing_fields", "Email, password, first_name and last_name are required")
+		return
+	}
+
+	if !emailRegex.MatchString(req.Email) {
+		WriteError(w, http.StatusBadRequest, "invalid_email", "Invalid email format")
 		return
 	}
 
@@ -92,7 +102,11 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		IP:         r.RemoteAddr,
 		ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
 	}
-	_ = h.storage.CreateSession(r.Context(), session)
+	if err := h.storage.CreateSession(r.Context(), session); err != nil {
+		h.logger.Error("failed to create session", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
+		return
+	}
 
 	WriteJSON(w, http.StatusCreated, AuthResponse{Token: token, User: user})
 }
@@ -140,16 +154,23 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		IP:         r.RemoteAddr,
 		ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
 	}
-	_ = h.storage.CreateSession(r.Context(), session)
+	if err := h.storage.CreateSession(r.Context(), session); err != nil {
+		h.logger.Error("failed to create session", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
+		return
+	}
 
 	WriteJSON(w, http.StatusOK, AuthResponse{Token: token, User: user})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+	if strings.HasPrefix(authHeader, "Bearer ") && len(authHeader) > 7 {
 		token := authHeader[7:]
-		_ = h.storage.DeleteSession(r.Context(), token)
+		if err := h.storage.DeleteSession(r.Context(), token); err != nil {
+			h.logger.Error("failed to delete session", "error", err)
+			// Don't return error to client, just log it
+		}
 	}
 	WriteJSON(w, http.StatusOK, map[string]string{"message": "Logged out successfully"})
 }

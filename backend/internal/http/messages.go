@@ -75,9 +75,11 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if req.ReplyTo != "" {
 		replyToID, err := uuid.Parse(req.ReplyTo)
-		if err == nil {
-			msg.ReplyTo = &replyToID
+		if err != nil {
+			WriteError(w, http.StatusBadRequest, "invalid_reply_to", "Invalid reply_to message ID")
+			return
 		}
+		msg.ReplyTo = &replyToID
 	}
 
 	if err := h.storage.CreateMessage(r.Context(), msg); err != nil {

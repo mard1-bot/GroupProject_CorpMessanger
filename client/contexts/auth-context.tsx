@@ -41,9 +41,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const storedUser = await AsyncStorage.getItem(USER_DATA_KEY);
 
       if (storedToken && storedUser) {
+        let parsedUser: User;
+        try {
+          parsedUser = JSON.parse(storedUser);
+        } catch (parseError) {
+          console.error('Failed to parse stored user data:', parseError);
+          // Clear corrupted data
+          await AsyncStorage.removeItem(USER_DATA_KEY);
+          setIsLoading(false);
+          return;
+        }
         api.setToken(storedToken);
         setToken(storedToken);
-        setUser(JSON.parse(storedUser));
+        setUser(parsedUser);
       }
     } catch (error) {
       console.error('Failed to load auth state:', error);

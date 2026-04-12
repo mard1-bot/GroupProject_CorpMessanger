@@ -81,17 +81,15 @@ func corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := r.Header.Get("Origin")
 
-		// Check if origin is in whitelist
+		// Only set CORS headers for whitelisted origins
 		if allowedOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
-		} else {
-			// For requests without origin or unknown origins, allow without credentials
-			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		}
-
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// For requests without origin or unknown origins, no CORS headers are set
+		// This is more secure than wildcard
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(stdhttp.StatusOK)

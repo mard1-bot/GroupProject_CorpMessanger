@@ -354,7 +354,7 @@ func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUI
 		SELECT id, chat_id, sender_id, type, content, created_at, updated_at, reply_to
 		FROM messages
 		WHERE chat_id = $1
-		ORDER BY created_at DESC
+		ORDER BY created_at ASC
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := s.db.QueryContext(ctx, query, chatID, limit, offset)

@@ -2,12 +2,21 @@ package http
 
 import (
 	"net/http"
+	"regexp"
+	"strings"
 
 	"corp-messenger/backend/internal/auth"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+// phoneRegex allows common phone number formats: +1234567890, (123) 456-7890, 123-456-7890, etc.
+var phoneRegex = regexp.MustCompile(`^[+]?[(]?[0-9]{1,4}[)]?[-\s.]?[0-9]{1,4}[-\s.]?[0-9]{1,9}$`)
+
+func isValidPhone(phone string) bool {
+	return phoneRegex.MatchString(phone)
+}
 
 func (h *Handler) getUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.storage.GetUsers(r.Context())
@@ -57,6 +66,38 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 
 	if err := decodeJSON(r.Body, &updates); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+
+	// Sanitize inputs (trim whitespace)
+	updates.FirstName = strings.TrimSpace(updates.FirstName)
+	updates.LastName = strings.TrimSpace(updates.LastName)
+	updates.MiddleName = strings.TrimSpace(updates.MiddleName)
+	updates.Phone = strings.TrimSpace(updates.Phone)
+	updates.Avatar = strings.TrimSpace(updates.Avatar)
+
+	// Validate input lengths
+	maxNameLength := 100
+	if len(updates.FirstName) > maxNameLength {
+		WriteError(w, http.StatusBadRequest, "first_name_too_long", "First name is too long")
+		return
+	}
+	if len(updates.LastName) > maxNameLength {
+		WriteError(w, http.StatusBadRequest, "last_name_too_long", "Last name is too long")
+		return
+	}
+	if len(updates.MiddleName) > maxNameLength {
+		WriteError(w, http.StatusBadRequest, "middle_name_too_long", "Middle name is too long")
+		return
+	}
+	if len(updates.Avatar) > 500 {
+		WriteError(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long")
+		return
+	}
+
+	// Basic phone validation (if provided)
+	if updates.Phone != "" && !isValidPhone(updates.Phone) {
+		WriteError(w, http.StatusBadRequest, "invalid_phone", "Invalid phone number format")
 		return
 	}
 
