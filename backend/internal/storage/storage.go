@@ -43,3 +43,45 @@ type SessionStorage interface {
 	GetSessionByToken(ctx context.Context, token string) (*models.Session, error)
 	DeleteSession(ctx context.Context, token string) error
 }
+
+// StubStorage is a stub implementation of Storage for testing
+type StubStorage struct{}
+
+func NewStub() *StubStorage {
+	return &StubStorage{}
+}
+
+func (s *StubStorage) Ready(ctx context.Context) error { return nil }
+func (s *StubStorage) Close() error                    { return nil }
+func (s *StubStorage) CreateUser(ctx context.Context, user *models.User, passwordHash string) error {
+	return nil
+}
+func (s *StubStorage) GetUserByEmail(ctx context.Context, email string) (*models.User, string, error) {
+	return nil, "", nil
+}
+func (s *StubStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	return nil, nil
+}
+func (s *StubStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
+	return nil, nil
+}
+func (s *StubStorage) CreateChat(ctx context.Context, chat *models.Chat) error { return nil }
+func (s *StubStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
+	return nil, nil
+}
+func (s *StubStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([]*models.Chat, error) {
+	return nil, nil
+}
+func (s *StubStorage) AddChatMember(ctx context.Context, member *models.ChatMember) error { return nil }
+func (s *StubStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
+	return nil, nil
+}
+func (s *StubStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
+func (s *StubStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) CreateSession(ctx context.Context, session *models.Session) error { return nil }
+func (s *StubStorage) GetSessionByToken(ctx context.Context, token string) (*models.Session, error) {
+	return nil, nil
+}
+func (s *StubStorage) DeleteSession(ctx context.Context, token string) error { return nil }
