@@ -70,17 +70,28 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	return r
 }
 
+// allowedOrigins is a whitelist of trusted origins for CORS
+var allowedOrigins = map[string]bool{
+	"http://localhost:3000":  true,
+	"http://localhost:19006": true, // Expo web
+	"http://localhost:8081":  true, // Expo metro
+}
+
 func corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+
+		// Check if origin is in whitelist
+		if allowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		} else {
+			// For requests without origin or unknown origins, allow without credentials
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 
-		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(stdhttp.StatusOK)

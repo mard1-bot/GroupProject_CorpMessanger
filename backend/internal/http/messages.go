@@ -42,7 +42,13 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, _ := h.storage.GetChatMembers(r.Context(), chatID)
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
 	isMember := false
 	for _, m := range members {
 		if m.UserID == claims.UserID {
@@ -97,7 +103,13 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, _ := h.storage.GetChatMembers(r.Context(), chatID)
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
 	isMember := false
 	for _, m := range members {
 		if m.UserID == claims.UserID {

@@ -43,7 +43,12 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existingUser, _, _ := h.storage.GetUserByEmail(r.Context(), req.Email)
+	existingUser, _, err := h.storage.GetUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		h.logger.Error("failed to check existing user", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to check user existence")
+		return
+	}
 	if existingUser != nil {
 		WriteError(w, http.StatusConflict, "email_exists", "User with this email already exists")
 		return

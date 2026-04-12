@@ -179,8 +179,17 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate role
+	validRoles := map[string]bool{
+		models.ChatRoleOwner:  true,
+		models.ChatRoleAdmin:  true,
+		models.ChatRoleMember: true,
+	}
 	if req.Role == "" {
 		req.Role = models.ChatRoleMember
+	} else if !validRoles[req.Role] {
+		WriteError(w, http.StatusBadRequest, "invalid_role", "Invalid role. Allowed: owner, admin, member")
+		return
 	}
 
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
@@ -190,15 +199,30 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if caller is a member and get their role
+	var callerRole string
 	isMember := false
 	for _, m := range members {
 		if m.UserID == claims.UserID {
 			isMember = true
+			callerRole = m.Role
 			break
 		}
 	}
 	if !isMember {
 		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	// Only owner/admin can add members
+	if callerRole != models.ChatRoleOwner && callerRole != models.ChatRoleAdmin {
+		WriteError(w, http.StatusForbidden, "forbidden", "Only chat owner or admin can add members")
+		return
+	}
+
+	// Only owner can assign owner/admin roles
+	if (req.Role == models.ChatRoleOwner || req.Role == models.ChatRoleAdmin) && callerRole != models.ChatRoleOwner {
+		WriteError(w, http.StatusForbidden, "forbidden", "Only chat owner can assign owner or admin roles")
 		return
 	}
 
