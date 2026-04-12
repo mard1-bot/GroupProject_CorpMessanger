@@ -11,16 +11,17 @@ import (
 )
 
 type Config struct {
-	AppEnv            string
-	HTTPPort          int
-	LogLevel          string
-	DBDSN             string
-	JWTSecret         string
-	EjabberdHost      string
-	EjabberdPort      int
-	EjabberdAPISecret string
-	StorageEndpoint   string
-	CORSOrigins       []string
+	AppEnv               string
+	HTTPPort             int
+	LogLevel             string
+	DBDSN                string
+	JWTSecret            string
+	EjabberdHost         string
+	EjabberdPort         int
+	EjabberdAPISecret    string
+	StorageEndpoint      string
+	CORSOrigins          []string
+	SessionDurationHours int
 }
 
 func Load() (Config, error) {
@@ -63,6 +64,16 @@ func Load() (Config, error) {
 			"http://localhost:19006",
 			"http://localhost:8081",
 		}
+	}
+	// Parse session duration (default 168 hours = 7 days)
+	if hours := optional("SESSION_DURATION_HOURS"); hours != "" {
+		h, err := strconv.Atoi(hours)
+		if err != nil || h < 1 || h > 720 {
+			return Config{}, fmt.Errorf("env SESSION_DURATION_HOURS must be between 1 and 720")
+		}
+		cfg.SessionDurationHours = h
+	} else {
+		cfg.SessionDurationHours = 168 // Default 7 days
 	}
 	return cfg, nil
 }

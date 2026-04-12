@@ -45,6 +45,7 @@ type SessionStorage interface {
 	CreateSession(ctx context.Context, session *models.Session) error
 	GetSessionByToken(ctx context.Context, token string) (*models.Session, error)
 	DeleteSession(ctx context.Context, token string) error
+	DeleteOldSessionsForUser(ctx context.Context, userID uuid.UUID, keep int) error
 }
 
 // StubStorage is a stub implementation of Storage for testing
@@ -95,3 +96,6 @@ func (s *StubStorage) GetSessionByToken(ctx context.Context, token string) (*mod
 	return nil, nil
 }
 func (s *StubStorage) DeleteSession(ctx context.Context, token string) error { return nil }
+func (s *StubStorage) DeleteOldSessionsForUser(ctx context.Context, userID uuid.UUID, keep int) error {
+	return nil
+}

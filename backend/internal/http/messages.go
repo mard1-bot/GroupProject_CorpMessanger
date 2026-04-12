@@ -36,6 +36,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	if req.Content == "" {
 		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required")

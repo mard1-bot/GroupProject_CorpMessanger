@@ -44,6 +44,7 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	if req.Type == "" {
 		req.Type = models.ChatTypeDirect
@@ -88,6 +89,23 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 				UserID: memberID,
 				Role:   models.ChatRoleMember,
 			})
+		}
+	}
+
+	// Verify all member IDs exist in database
+	for _, member := range membersList {
+		if member.UserID == claims.UserID {
+			continue // Skip creator check (we know they exist from auth)
+		}
+		user, err := h.storage.GetUserByID(r.Context(), member.UserID)
+		if err != nil {
+			h.logger.Error("failed to verify member", "user_id", member.UserID, "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify member")
+			return
+		}
+		if user == nil {
+			WriteError(w, http.StatusNotFound, "member_not_found", "User not found: "+member.UserID.String())
+			return
 		}
 	}
 
@@ -193,6 +211,7 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	userID, err := uuid.Parse(req.UserID)
 	if err != nil {

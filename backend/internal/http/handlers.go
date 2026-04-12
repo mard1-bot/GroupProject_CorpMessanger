@@ -1,8 +1,10 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	stdhttp "net/http"
 	"time"
 )
@@ -16,11 +18,25 @@ type apiError struct {
 }
 
 func WriteJSON(w stdhttp.ResponseWriter, status int, payload any) {
+	if payload == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		return
+	}
+
+	// Marshal to buffer first to catch encoding errors before writing headers
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(payload); err != nil {
+		slog.Error("JSON encoding error", "error", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(errorResponse{Error: apiError{Code: "internal", Message: "Failed to encode response"}})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if payload != nil {
-		_ = json.NewEncoder(w).Encode(payload)
-	}
+	_, _ = w.Write(buf.Bytes())
 }
 func WriteError(w stdhttp.ResponseWriter, status int, code, message string) {
 	WriteJSON(w, status, errorResponse{Error: apiError{Code: code, Message: message}})

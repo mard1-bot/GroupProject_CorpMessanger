@@ -5,6 +5,9 @@ import (
 	"io"
 	"log/slog"
 	stdhttp "net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/ejabberd"
@@ -15,27 +18,90 @@ import (
 )
 
 type Handler struct {
-	logger      *slog.Logger
-	storage     storage.Storage
-	ejabberd    ejabberd.Client
-	jwt         *auth.JWTService
-	corsOrigins map[string]bool
+	logger          *slog.Logger
+	storage         storage.Storage
+	ejabberd        ejabberd.Client
+	jwt             *auth.JWTService
+	corsOrigins     map[string]bool
+	sessionDuration time.Duration
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string) stdhttp.Handler {
-	// Build CORS origins map
+// Rate limiting
+type rateLimitEntry struct {
+	count     int
+	resetTime time.Time
+}
+
+var (
+	rateLimits   = make(map[string]*rateLimitEntry)
+	rateLimitMux sync.RWMutex
+)
+
+// Simple rate limiter: 5 requests per minute per IP
+func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
+	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		ip := r.RemoteAddr
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			ip = forwarded
+		}
+
+		rateLimitMux.Lock()
+		entry, exists := rateLimits[ip]
+		now := time.Now()
+
+		if !exists || now.After(entry.resetTime) {
+			rateLimits[ip] = &rateLimitEntry{
+				count:     1,
+				resetTime: now.Add(time.Minute),
+			}
+			rateLimitMux.Unlock()
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		entry.count++
+		count := entry.count
+		rateLimitMux.Unlock()
+
+		if count > 5 {
+			WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration) stdhttp.Handler {
+	// Build CORS origins map (lowercase for case-insensitive comparison)
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
-		originsMap[origin] = true
+		originsMap[strings.ToLower(origin)] = true
 	}
 
 	h := &Handler{
-		logger:      logger,
-		storage:     storage,
-		ejabberd:    ejabberd,
-		jwt:         auth.NewJWTService(jwtSecret),
-		corsOrigins: originsMap,
+		logger:          logger,
+		storage:         storage,
+		ejabberd:        ejabberd,
+		jwt:             auth.NewJWTService(jwtSecret),
+		corsOrigins:     originsMap,
+		sessionDuration: sessionDuration,
 	}
+
+	// Clean up old rate limit entries periodically
+	go func() {
+		for {
+			time.Sleep(10 * time.Minute)
+			now := time.Now()
+			rateLimitMux.Lock()
+			for ip, entry := range rateLimits {
+				if now.After(entry.resetTime) {
+					delete(rateLimits, ip)
+				}
+			}
+			rateLimitMux.Unlock()
+		}
+	}()
 
 	r := chi.NewRouter()
 
@@ -50,8 +116,9 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	r.Get("/ready", h.ready)
 
 	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/auth/register", h.register)
-		r.Post("/auth/login", h.login)
+		// Auth endpoints with rate limiting
+		r.With(rateLimitMiddleware).Post("/auth/register", h.register)
+		r.With(rateLimitMiddleware).Post("/auth/login", h.login)
 
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(h.jwt, h.storage))
@@ -80,9 +147,9 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
-		origin := r.Header.Get("Origin")
+		origin := strings.ToLower(r.Header.Get("Origin"))
 
-		// Only set CORS headers for whitelisted origins
+		// Only set CORS headers for whitelisted origins (case-insensitive)
 		if h.corsOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")

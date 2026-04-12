@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE TABLE IF NOT EXISTS sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
-    token VARCHAR(500) NOT NULL,
+    token VARCHAR(500) NOT NULL UNIQUE,
     device_info VARCHAR(255),
     ip VARCHAR(45),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -123,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 `
 	_, err := s.db.Exec(schema)
 	return err
@@ -380,10 +381,13 @@ func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([
 }
 
 func (s *PostgresStorage) AddChatMember(ctx context.Context, member *models.ChatMember) error {
+	// Add member and update chat's updated_at timestamp
 	query := `
 		INSERT INTO chat_members (chat_id, user_id, role)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (chat_id, user_id) DO UPDATE SET role = $3
+		ON CONFLICT (chat_id, user_id) DO UPDATE SET role = $3;
+		
+		UPDATE chats SET updated_at = NOW() WHERE id = $1;
 	`
 	_, err := s.db.ExecContext(ctx, query, member.ChatID, member.UserID, member.Role)
 	return err
@@ -516,5 +520,20 @@ func (s *PostgresStorage) GetSessionByToken(ctx context.Context, token string) (
 
 func (s *PostgresStorage) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = $1`, token)
+	return err
+}
+
+func (s *PostgresStorage) DeleteOldSessionsForUser(ctx context.Context, userID uuid.UUID, keep int) error {
+	// Keep only the most recent 'keep' sessions for the user
+	query := `
+		DELETE FROM sessions
+		WHERE id IN (
+			SELECT id FROM sessions
+			WHERE user_id = $1
+			ORDER BY created_at DESC
+			OFFSET $2
+		)
+	`
+	_, err := s.db.ExecContext(ctx, query, userID, keep)
 	return err
 }

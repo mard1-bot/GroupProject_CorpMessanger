@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/mail"
@@ -47,6 +48,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	if req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
 		WriteError(w, http.StatusBadRequest, "missing_fields", "Email, password, first_name and last_name are required")
@@ -114,7 +116,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, 7*24*time.Hour)
+	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {
 		h.logger.Error("failed to generate token", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to generate token")
@@ -127,13 +129,22 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		Token:      token,
 		DeviceInfo: r.UserAgent(),
 		IP:         r.RemoteAddr,
-		ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
+		ExpiresAt:  time.Now().Add(h.sessionDuration),
 	}
 	if err := h.storage.CreateSession(r.Context(), session); err != nil {
 		h.logger.Error("failed to create session", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
 		return
 	}
+
+	// Clean up old sessions for this user (keep only 5 most recent)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.storage.DeleteOldSessionsForUser(ctx, user.ID, 5); err != nil {
+			h.logger.Error("failed to cleanup old sessions", "error", err)
+		}
+	}()
 
 	WriteJSON(w, http.StatusCreated, AuthResponse{Token: token, User: user})
 }
@@ -144,6 +155,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	if req.Email == "" || req.Password == "" {
 		WriteError(w, http.StatusBadRequest, "missing_fields", "Email and password are required")
@@ -166,7 +178,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, 7*24*time.Hour)
+	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {
 		h.logger.Error("failed to generate token", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to generate token")
@@ -179,13 +191,22 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		Token:      token,
 		DeviceInfo: r.UserAgent(),
 		IP:         r.RemoteAddr,
-		ExpiresAt:  time.Now().Add(7 * 24 * time.Hour),
+		ExpiresAt:  time.Now().Add(h.sessionDuration),
 	}
 	if err := h.storage.CreateSession(r.Context(), session); err != nil {
 		h.logger.Error("failed to create session", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
 		return
 	}
+
+	// Clean up old sessions for this user (keep only 5 most recent)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.storage.DeleteOldSessionsForUser(ctx, user.ID, 5); err != nil {
+			h.logger.Error("failed to cleanup old sessions", "error", err)
+		}
+	}()
 
 	WriteJSON(w, http.StatusOK, AuthResponse{Token: token, User: user})
 }

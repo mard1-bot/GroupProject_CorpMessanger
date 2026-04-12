@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"corp-messenger/backend/internal/models"
 
@@ -54,13 +55,16 @@ func (s testStorage) GetSessionByToken(ctx context.Context, token string) (*mode
 	return nil, nil
 }
 func (s testStorage) DeleteSession(ctx context.Context, token string) error { return nil }
+func (s testStorage) DeleteOldSessionsForUser(ctx context.Context, userID uuid.UUID, keep int) error {
+	return nil
+}
 
 type testEjabberd struct{ err error }
 
 func (e testEjabberd) Ready(context.Context) error { return e.err }
 func (e testEjabberd) Close() error                { return nil }
 func TestHealth(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"})
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/health", nil)
 	h.ServeHTTP(rr, req)
@@ -69,7 +73,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 func TestReady(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"})
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/ready", nil)
 	h.ServeHTTP(rr, req)

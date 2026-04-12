@@ -79,6 +79,7 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
+	defer r.Body.Close()
 
 	// Sanitize inputs (trim whitespace)
 	updates.FirstName = strings.TrimSpace(updates.FirstName)
@@ -123,14 +124,26 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate FirstName - cannot be empty after trimming
 	if updates.FirstName != "" {
-		user.FirstName = updates.FirstName
+		if trimmed := strings.TrimSpace(updates.FirstName); trimmed == "" {
+			WriteError(w, http.StatusBadRequest, "invalid_first_name", "First name cannot be empty")
+			return
+		} else {
+			user.FirstName = trimmed
+		}
 	}
+	// Validate LastName - cannot be empty after trimming
 	if updates.LastName != "" {
-		user.LastName = updates.LastName
+		if trimmed := strings.TrimSpace(updates.LastName); trimmed == "" {
+			WriteError(w, http.StatusBadRequest, "invalid_last_name", "Last name cannot be empty")
+			return
+		} else {
+			user.LastName = trimmed
+		}
 	}
 	if updates.MiddleName != "" {
-		user.MiddleName = updates.MiddleName
+		user.MiddleName = strings.TrimSpace(updates.MiddleName)
 	}
 	if updates.Phone != "" {
 		user.Phone = updates.Phone

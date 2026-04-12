@@ -53,7 +53,7 @@ func New() (*App, error) {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters long for security (HS256)")
 	}
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins)
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           handler,
