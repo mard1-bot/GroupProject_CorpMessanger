@@ -2,12 +2,13 @@ import { Platform } from 'react-native';
 
 // Configuration: Change this to your computer's local IP for physical device testing
 const COMPUTER_IP = '192.168.0.103';
+const BACKEND_PORT = '8081';
 
 // API URL - automatically selects the correct URL for each platform
 const API_URL = Platform.select({
-  ios: 'http://localhost:8080',     // iOS Simulator
-  android: `http://${COMPUTER_IP}:8080`, // Android (physical device) - use IP
-  default: 'http://localhost:8080', // Web / fallback
+  ios: `http://localhost:${BACKEND_PORT}`,     // iOS Simulator
+  android: `http://${COMPUTER_IP}:${BACKEND_PORT}`, // Android (physical device) - use IP
+  default: `http://localhost:${BACKEND_PORT}`, // Web / fallback
 });
 
 // For Android Emulator use: 'http://10.0.2.2:8080'
