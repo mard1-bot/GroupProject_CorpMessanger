@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"go-backend-scaffold/internal/app"
+	"corp-messenger/backend/internal/app"
 )
 
 func main() {

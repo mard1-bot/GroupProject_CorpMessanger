@@ -1,77 +1,103 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useEffect, useState } from 'react';
+import { StyleSheet, Button, View, ActivityIndicator, Alert } from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { useAuth } from '@/contexts/auth-context';
+import { useHealth, useUsers } from '@/hooks/use-api';
+import { IconSymbol } from '@/components/ui/icon-symbol';
 
 export default function HomeScreen() {
+  const { user, isAuthenticated, logout } = useAuth();
+  const { data: healthData, loading: healthLoading, error: healthError, execute: checkHealth } = useHealth();
+  const { data: users, loading: usersLoading, execute: loadUsers } = useUsers();
+
+  useEffect(() => {
+    checkHealth();
+  }, []);
+
+  const handleLogout = async () => {
+    await logout();
+    Alert.alert('Success', 'Logged out successfully');
+  };
+
   return (
     <ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
       headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
+        <IconSymbol
+          size={200}
+          color="#808080"
+          name="bubble.left.and.bubble.right.fill"
+          style={styles.headerImage}
         />
       }>
       <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
+        <ThemedText type="title">Corp Messenger</ThemedText>
       </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
+      <ThemedView style={styles.section}>
+        <ThemedText type="subtitle">Backend Connection</ThemedText>
+        {healthLoading ? (
+          <ActivityIndicator />
+        ) : healthError ? (
+          <ThemedText style={styles.error}>
+            Backend Status: Offline\n{healthError.message}
+          </ThemedText>
+        ) : healthData ? (
+          <ThemedText style={styles.success}>
+            Backend Status: {healthData.status}
+          </ThemedText>
+        ) : null}
+        <View style={styles.buttonContainer}>
+          <Button title="Check Health" onPress={checkHealth} />
+        </View>
       </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
+
+      <ThemedView style={styles.section}>
+        <ThemedText type="subtitle">Authentication</ThemedText>
+        {isAuthenticated ? (
+          <>
+            <ThemedText style={styles.success}>
+              Logged in as: {user?.first_name} {user?.last_name}
+            </ThemedText>
+            <ThemedText>Email: {user?.email}</ThemedText>
+            <View style={styles.buttonContainer}>
+              <Button title="Logout" onPress={handleLogout} color="#ff4444" />
+            </View>
+            <View style={styles.buttonContainer}>
+              <Button title="Load Users" onPress={loadUsers} />
+            </View>
+            {usersLoading ? <ActivityIndicator /> : null}
+            {users ? (
+              <ThemedText>
+                Total users: {users.length}
+              </ThemedText>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <ThemedText style={styles.warning}>
+              Not logged in. Go to Login tab to authenticate.
+            </ThemedText>
+            <ThemedText>
+              Backend URL: http://localhost:8080
+            </ThemedText>
+          </>
+        )}
+      </ThemedView>
+
+      <ThemedView style={styles.section}>
+        <ThemedText type="subtitle">API Endpoints</ThemedText>
+        <ThemedText style={styles.code}>
+          POST /api/v1/auth/register{'\n'}
+          POST /api/v1/auth/login{'\n'}
+          GET  /api/v1/auth/me{'\n'}
+          GET  /api/v1/users{'\n'}
+          POST /api/v1/chats{'\n'}
+          GET  /api/v1/chats{'\n'}
+          POST /api/v1/chats/:id/messages
         </ThemedText>
       </ThemedView>
     </ParallaxScrollView>
@@ -83,16 +109,37 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    marginBottom: 16,
   },
-  stepContainer: {
+  section: {
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 16,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ccc',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
+  headerImage: {
+    color: '#808080',
+    bottom: -50,
+    left: -35,
     position: 'absolute',
+  },
+  buttonContainer: {
+    marginVertical: 8,
+  },
+  error: {
+    color: '#ff4444',
+  },
+  success: {
+    color: '#44ff44',
+  },
+  warning: {
+    color: '#ffaa00',
+  },
+  code: {
+    fontFamily: 'monospace',
+    fontSize: 12,
+    opacity: 0.8,
   },
 });
