@@ -35,3 +35,11 @@ export const BrandGradient = {
   light: ['#4DA3FF', '#8B5CFF'] as const,
   dark: ['#4DA3FF', '#8B5CFF'] as const,
 };
+
+export const Fonts = {
+  rounded: 'System', // Fallback, can be replaced with custom font
+  regular: 'System',
+  medium: 'System',
+  semibold: 'System',
+  bold: 'System',
+};
