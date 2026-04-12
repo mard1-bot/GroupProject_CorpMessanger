@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
@@ -21,6 +23,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	_ = godotenv.Load()
 	cfg := Config{}
 	var err error
 	if cfg.AppEnv, err = required("APP_ENV"); err != nil {
