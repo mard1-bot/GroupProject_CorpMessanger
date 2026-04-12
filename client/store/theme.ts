@@ -1,6 +1,5 @@
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 
 export type ThemeScheme = 'light' | 'dark' | 'system';
 
@@ -9,18 +8,11 @@ type ThemeState = {
   setColorScheme: (scheme: ThemeScheme) => void;
 };
 
-export const useThemeStore = create<ThemeState>()(
-  persist(
-    (set) => ({
-      colorScheme: 'system',
-      setColorScheme: (scheme) => {
-        console.log('[Theme] Changing to:', scheme);
-        set({ colorScheme: scheme });
-      },
-    }),
-    {
-      name: 'theme-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-    }
-  )
-);
+// Simple store that works on both web and native
+export const useThemeStore = create<ThemeState>((set) => ({
+  colorScheme: 'system',
+  setColorScheme: (scheme) => {
+    console.log('[Theme] Changing to:', scheme);
+    set({ colorScheme: scheme });
+  },
+}));
