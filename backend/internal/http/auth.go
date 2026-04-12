@@ -105,7 +105,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, passwordHash, err := h.storage.GetUserByEmail(r.Context(), req.Email)
-	if err != nil || user == nil {
+	if err != nil {
+		h.logger.Error("failed to get user by email", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to authenticate user")
+		return
+	}
+	if user == nil {
 		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}

@@ -61,7 +61,12 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
-	if err != nil || user == nil {
+	if err != nil {
+		h.logger.Error("failed to get user by ID", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get user")
+		return
+	}
+	if user == nil {
 		WriteError(w, http.StatusNotFound, "not_found", "User not found")
 		return
 	}

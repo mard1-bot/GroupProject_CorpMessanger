@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import api, { ApiResponse, ApiError } from '@/services/api';
 
 interface UseApiState<T> {
@@ -67,42 +67,53 @@ export function useApi<T, Args extends unknown[]>(apiFunc: ApiFunction<T, Args>)
 }
 
 // Predefined hooks for common API operations
+// Using useMemo to create stable function references and prevent infinite re-renders
 export function useLogin() {
-  return useApi(api.login.bind(api));
+  const apiFunc = useMemo(() => api.login.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useRegister() {
-  return useApi(api.register.bind(api));
+  const apiFunc = useMemo(() => api.register.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useLogout() {
-  return useApi(api.logout.bind(api));
+  const apiFunc = useMemo(() => api.logout.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useCurrentUser() {
-  return useApi(api.getCurrentUser.bind(api));
+  const apiFunc = useMemo(() => api.getCurrentUser.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useUsers() {
-  return useApi(api.getUsers.bind(api));
+  const apiFunc = useMemo(() => api.getUsers.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useChats() {
-  return useApi(api.getUserChats.bind(api));
+  const apiFunc = useMemo(() => api.getUserChats.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useCreateChat() {
-  return useApi(api.createChat.bind(api));
+  const apiFunc = useMemo(() => api.createChat.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useChatMessages() {
-  return useApi(api.getChatMessages.bind(api));
+  const apiFunc = useMemo(() => api.getChatMessages.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useSendMessage() {
-  return useApi(api.sendMessage.bind(api));
+  const apiFunc = useMemo(() => api.sendMessage.bind(api), []);
+  return useApi(apiFunc);
 }
 
 export function useHealth() {
-  return useApi(api.health.bind(api));
+  const apiFunc = useMemo(() => api.health.bind(api), []);
+  return useApi(apiFunc);
 }
