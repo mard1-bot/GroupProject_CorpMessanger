@@ -33,6 +33,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(corsMiddleware)
 	r.Use(AccessLogMiddleware(logger))
 	r.Use(RecoverMiddleware(logger))
 	r.Use(middleware.StripSlashes)
@@ -67,6 +68,27 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	r.NotFound(h.notFound)
 
 	return r
+}
+
+func corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
+	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(stdhttp.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func decodeJSON(r io.Reader, v interface{}) error {
