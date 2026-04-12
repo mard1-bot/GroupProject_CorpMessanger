@@ -1,8 +1,16 @@
-// API URL configuration
-// For development with local backend
-const API_URL = 'http://localhost:8080';
-// For physical device testing, use your computer's local IP:
-// const API_URL = 'http://192.168.1.X:8080';
+import { Platform } from 'react-native';
+
+// Configuration: Change this to your computer's local IP for physical device testing
+const COMPUTER_IP = '192.168.0.103';
+
+// API URL - automatically selects the correct URL for each platform
+const API_URL = Platform.select({
+  ios: 'http://localhost:8080',     // iOS Simulator
+  android: `http://${COMPUTER_IP}:8080`, // Android (physical device) - use IP
+  default: 'http://localhost:8080', // Web / fallback
+});
+
+// For Android Emulator use: 'http://10.0.2.2:8080'
 // For production, set your deployed backend URL
 
 export interface ApiError {
