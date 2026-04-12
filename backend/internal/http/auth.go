@@ -53,6 +53,28 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Password strength validation
+	if len(req.Password) < 8 {
+		WriteError(w, http.StatusBadRequest, "password_too_short", "Password must be at least 8 characters long")
+		return
+	}
+	// Check for at least one uppercase, one lowercase, one digit
+	var hasUpper, hasLower, hasDigit bool
+	for _, ch := range req.Password {
+		switch {
+		case ch >= 'A' && ch <= 'Z':
+			hasUpper = true
+		case ch >= 'a' && ch <= 'z':
+			hasLower = true
+		case ch >= '0' && ch <= '9':
+			hasDigit = true
+		}
+	}
+	if !hasUpper || !hasLower || !hasDigit {
+		WriteError(w, http.StatusBadRequest, "password_too_weak", "Password must contain at least one uppercase letter, one lowercase letter, and one digit")
+		return
+	}
+
 	existingUser, _, err := h.storage.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		h.logger.Error("failed to check existing user", "error", err)

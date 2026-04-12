@@ -6,7 +6,7 @@ import {
   getMessagesByChatId,
   getOtherParticipant,
 } from '@/data/mock';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import dayjs from 'dayjs';
 import 'dayjs/locale/ru';
@@ -62,7 +62,7 @@ export default function ChatScreen() {
   const navigation = useNavigation();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const currentUser = useAuthStore((s) => s.currentUser);
+  const { user: currentUser } = useAuth();
 
   const chat = id ? getChatById(id) : undefined;
   const other = chat && currentUser ? getOtherParticipant(chat, currentUser.id) : undefined;

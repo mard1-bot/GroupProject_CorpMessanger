@@ -7,12 +7,11 @@ import { ThemedView } from '@/components/themed-view';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useThemeColor } from '@/hooks/use-theme-color';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 import { useThemeStore, type ThemeScheme } from '@/store/theme';
 
 export default function ProfileScreen() {
-  const currentUser = useAuthStore((s) => s.currentUser);
-  const logout = useAuthStore((s) => s.logout);
+  const { user: currentUser, logout } = useAuth();
   const router = useRouter();
   const tintColor = useThemeColor({}, 'tint');
   const colorScheme = useThemeStore((s) => s.colorScheme);
@@ -21,15 +20,13 @@ export default function ProfileScreen() {
   const isDark = useColorScheme() === 'dark';
   const selectedOptionTextColor = isDark ? '#fff' : Colors.light.text;
   const bgColor = useThemeColor({}, 'background');
-  
-  console.log('[Profile] colorScheme:', colorScheme, 'isDark:', isDark, 'bgColor:', bgColor);
 
-  const initials = currentUser?.name
-    ? currentUser.name.split(' ').map((n) => n[0]).join('').slice(0, 2)
+  const initials = currentUser?.first_name
+    ? (currentUser.first_name[0] + (currentUser.last_name?.[0] || '')).toUpperCase()
     : '?';
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     router.replace('/(auth)/login');
   };
 
@@ -52,8 +49,8 @@ export default function ProfileScreen() {
                 {initials}
               </ThemedText>
             </View>
-            <ThemedText style={styles.name}>{currentUser?.name ?? ''}</ThemedText>
-            <ThemedText style={styles.username}>{currentUser?.username ?? ''}</ThemedText>
+            <ThemedText style={styles.name}>{currentUser?.first_name} {currentUser?.last_name}</ThemedText>
+            <ThemedText style={styles.username}>{currentUser?.email}</ThemedText>
           </View>
           <View style={styles.section}>
             <ThemedText type="subtitle" style={styles.sectionTitle}>

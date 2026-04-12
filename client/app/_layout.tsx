@@ -15,7 +15,6 @@ export default function RootLayout() {
   const systemScheme = useRNColorScheme();
   const preference = useThemeStore((s) => s.colorScheme);
   const colorScheme = preference === 'system' ? (systemScheme ?? 'light') : preference;
-  console.log('[RootLayout] preference:', preference, 'system:', systemScheme, 'colorScheme:', colorScheme);
 
   return (
     <AuthProvider>

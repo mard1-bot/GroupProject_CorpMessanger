@@ -11,15 +11,14 @@ import {
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useThemeColor } from '@/hooks/use-theme-color';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 
 export default function LoginScreen() {
-  const [username, setUsername] = useState('');
+  const { login, isLoading } = useAuth();
+  const router = useRouter();
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-
-  const login = useAuthStore((s) => s.login);
-  const router = useRouter();
 
   const textColor = useThemeColor({}, 'text');
   const surfaceColor = useThemeColor({}, 'surface');
@@ -27,17 +26,12 @@ export default function LoginScreen() {
   const placeholderColor = useThemeColor({}, 'textSecondary');
   const primaryColor = useThemeColor({}, 'primary');
 
-  const handleLogin = () => {
-    setError('');
-    if (!username.trim() || !password.trim()) {
-      setError('Введите имя пользователя и пароль');
-      return;
-    }
-    const ok = login(username.trim(), password);
-    if (ok) {
+  const handleLogin = async () => {
+    try {
+      await login(email, password);
       router.replace('/(tabs)');
-    } else {
-      setError('Неверное имя пользователя или пароль');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка входа');
     }
   };
 
@@ -51,12 +45,13 @@ export default function LoginScreen() {
         </ThemedText>
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
-          placeholder="Имя пользователя"
+          placeholder="Email"
           placeholderTextColor={placeholderColor}
-          value={username}
-          onChangeText={setUsername}
+          value={email}
+          onChangeText={setEmail}
           autoCapitalize="none"
-          autoComplete="username"
+          autoComplete="email"
+          keyboardType="email-address"
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}

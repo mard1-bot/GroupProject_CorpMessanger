@@ -373,8 +373,11 @@ func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUI
 			return nil, err
 		}
 		if replyTo.Valid {
-			id, _ := uuid.Parse(replyTo.String)
-			m.ReplyTo = &id
+			id, err := uuid.Parse(replyTo.String)
+			if err == nil {
+				m.ReplyTo = &id
+			}
+			// If parse fails, ReplyTo remains nil (invalid UUID in DB)
 		}
 		messages = append(messages, m)
 	}

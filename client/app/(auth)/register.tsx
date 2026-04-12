@@ -11,16 +11,16 @@ import {
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useThemeColor } from '@/hooks/use-theme-color';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 
 export default function RegisterScreen() {
-  const [name, setName] = useState('');
-  const [username, setUsername] = useState('');
+  const { register, isLoading } = useAuth();
+  const router = useRouter();
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
-
-  const register = useAuthStore((s) => s.register);
-  const router = useRouter();
 
   const textColor = useThemeColor({}, 'text');
   const surfaceColor = useThemeColor({}, 'surface');
@@ -28,21 +28,32 @@ export default function RegisterScreen() {
   const placeholderColor = useThemeColor({}, 'textSecondary');
   const primaryColor = useThemeColor({}, 'primary');
 
-  const handleRegister = () => {
+  const handleRegister = async () => {
     setError('');
-    if (!name.trim() || !username.trim() || !password.trim()) {
+    if (!firstName.trim() || !lastName.trim() || !email.trim() || !password.trim()) {
       setError('Заполните все поля');
       return;
     }
-    if (password.length < 4) {
-      setError('Пароль не менее 4 символов');
+    if (password.length < 8) {
+      setError('Пароль должен быть не менее 8 символов');
       return;
     }
-    const ok = register(name.trim(), username.trim(), password);
-    if (ok) {
-      router.replace('/(tabs)');
-    } else {
-      setError('Такое имя пользователя уже занято');
+    if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/[0-9]/.test(password)) {
+      setError('Пароль должен содержать заглавную, строчную букву и цифру');
+      return;
+    }
+    try {
+      const ok = await register({
+        email: email.trim(),
+        password,
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+      });
+      if (ok) {
+        router.replace('/(tabs)');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка регистрации');
     }
   };
 
@@ -58,18 +69,27 @@ export default function RegisterScreen() {
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
           placeholder="Имя"
           placeholderTextColor={placeholderColor}
-          value={name}
-          onChangeText={setName}
-          autoComplete="name"
+          value={firstName}
+          onChangeText={setFirstName}
+          autoComplete="given-name"
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
-          placeholder="Имя пользователя"
+          placeholder="Фамилия"
           placeholderTextColor={placeholderColor}
-          value={username}
-          onChangeText={setUsername}
+          value={lastName}
+          onChangeText={setLastName}
+          autoComplete="family-name"
+        />
+        <TextInput
+          style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
+          placeholder="Email"
+          placeholderTextColor={placeholderColor}
+          value={email}
+          onChangeText={setEmail}
           autoCapitalize="none"
-          autoComplete="username"
+          autoComplete="email"
+          keyboardType="email-address"
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}

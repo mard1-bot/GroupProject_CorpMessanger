@@ -69,6 +69,8 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.storage.AddChatMember(r.Context(), ownerMember); err != nil {
 		h.logger.Error("failed to add creator as member", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to add creator as member")
+		return
 	}
 
 	// Validate and collect member IDs first

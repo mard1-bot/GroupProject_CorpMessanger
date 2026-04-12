@@ -9,10 +9,10 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { getOtherParticipant, mockChats } from '@/data/mock';
 import { useThemeColor } from '@/hooks/use-theme-color';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 
 export default function ChatsScreen() {
-  const currentUser = useAuthStore((s) => s.currentUser);
+  const { user: currentUser } = useAuth();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
   const primaryColor = useThemeColor({}, 'primary');

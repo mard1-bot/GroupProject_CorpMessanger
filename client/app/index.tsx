@@ -1,8 +1,8 @@
 import { Redirect, useRootNavigationState } from 'expo-router';
-import { useAuthStore } from '@/store/auth';
+import { useAuth } from '@/contexts/auth-context';
 
 export default function Index() {
-  const currentUser = useAuthStore((s) => s.currentUser);
+  const { user: currentUser } = useAuth();
   const rootState = useRootNavigationState();
 
   if (!rootState?.key) return null;
