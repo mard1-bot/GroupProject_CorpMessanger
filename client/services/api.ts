@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 
 // Configuration: Change this to your computer's local IP for physical device testing
 const COMPUTER_IP = '192.168.0.103';
-const BACKEND_PORT = '8081';
+const BACKEND_PORT = '3000';
 
 // API URL - automatically selects the correct URL for each platform
 const API_URL = Platform.select({
