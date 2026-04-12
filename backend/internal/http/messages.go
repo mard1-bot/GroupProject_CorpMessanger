@@ -66,6 +66,19 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		msgType = models.MessageTypeText
 	}
 
+	// Validate message type
+	validTypes := map[string]bool{
+		models.MessageTypeText:  true,
+		models.MessageTypeImage: true,
+		models.MessageTypeFile:  true,
+		models.MessageTypeVoice: true,
+		models.MessageTypeVideo: true,
+	}
+	if !validTypes[msgType] {
+		WriteError(w, http.StatusBadRequest, "invalid_type", "Invalid message type")
+		return
+	}
+
 	msg := &models.Message{
 		ChatID:   chatID,
 		SenderID: claims.UserID,
@@ -77,6 +90,21 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		replyToID, err := uuid.Parse(req.ReplyTo)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "invalid_reply_to", "Invalid reply_to message ID")
+			return
+		}
+		// Verify the replied-to message exists in the same chat
+		replyMsg, err := h.storage.GetMessageByID(r.Context(), replyToID)
+		if err != nil {
+			h.logger.Error("failed to get reply message", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate reply_to")
+			return
+		}
+		if replyMsg == nil {
+			WriteError(w, http.StatusBadRequest, "reply_not_found", "Reply-to message not found")
+			return
+		}
+		if replyMsg.ChatID != chatID {
+			WriteError(w, http.StatusBadRequest, "reply_wrong_chat", "Reply-to message is not in this chat")
 			return
 		}
 		msg.ReplyTo = &replyToID

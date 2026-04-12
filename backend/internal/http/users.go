@@ -11,11 +11,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// phoneRegex allows common phone number formats: +1234567890, (123) 456-7890, 123-456-7890, etc.
-var phoneRegex = regexp.MustCompile(`^[+]?[(]?[0-9]{1,4}[)]?[-\s.]?[0-9]{1,4}[-\s.]?[0-9]{1,9}$`)
+// phoneRegex requires at least 10 digits, allows +, spaces, dashes, parentheses
+// Examples: +1234567890, +1 (123) 456-7890, 123-456-7890
+var phoneRegex = regexp.MustCompile(`^[+]?[\s\d\-\(\)]{10,20}$`)
 
 func isValidPhone(phone string) bool {
-	return phoneRegex.MatchString(phone)
+	if !phoneRegex.MatchString(phone) {
+		return false
+	}
+	// Count digits - must be at least 10
+	digitCount := 0
+	for _, ch := range phone {
+		if ch >= '0' && ch <= '9' {
+			digitCount++
+		}
+	}
+	return digitCount >= 10
 }
 
 func (h *Handler) getUsers(w http.ResponseWriter, r *http.Request) {
@@ -90,8 +101,8 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "middle_name_too_long", "Middle name is too long")
 		return
 	}
-	if len(updates.Avatar) > 500 {
-		WriteError(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long")
+	if len(updates.Avatar) > 2048 {
+		WriteError(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long (max 2048 characters)")
 		return
 	}
 

@@ -72,6 +72,7 @@ export default function RegisterScreen() {
           value={firstName}
           onChangeText={setFirstName}
           autoComplete="given-name"
+          editable={!isLoading}
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
@@ -80,6 +81,7 @@ export default function RegisterScreen() {
           value={lastName}
           onChangeText={setLastName}
           autoComplete="family-name"
+          editable={!isLoading}
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
@@ -90,6 +92,7 @@ export default function RegisterScreen() {
           autoCapitalize="none"
           autoComplete="email"
           keyboardType="email-address"
+          editable={!isLoading}
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
@@ -99,13 +102,17 @@ export default function RegisterScreen() {
           onChangeText={setPassword}
           secureTextEntry
           autoComplete="password"
+          editable={!isLoading}
         />
         {error ? <ThemedText style={styles.error}>{error}</ThemedText> : null}
         <TouchableOpacity
-          style={[styles.button, { backgroundColor: primaryColor }]}
+          style={[styles.button, { backgroundColor: primaryColor }, isLoading && styles.buttonDisabled]}
           onPress={handleRegister}
+          disabled={isLoading}
           activeOpacity={0.8}>
-          <ThemedText style={styles.buttonText}>Зарегистрироваться</ThemedText>
+          <ThemedText style={styles.buttonText}>
+            {isLoading ? 'Регистрация...' : 'Зарегистрироваться'}
+          </ThemedText>
         </TouchableOpacity>
         <TouchableOpacity style={styles.linkButton} onPress={() => router.back()} activeOpacity={0.7}>
           <ThemedText type="link">Уже есть аккаунт? Войти</ThemedText>
@@ -129,6 +136,7 @@ const styles = StyleSheet.create({
   },
   error: { color: '#c53030', marginBottom: 12, fontSize: 14 },
   button: { borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
+  buttonDisabled: { opacity: 0.6 },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   linkButton: { marginTop: 24, alignItems: 'center' },
 });

@@ -20,6 +20,7 @@ type Config struct {
 	EjabberdPort      int
 	EjabberdAPISecret string
 	StorageEndpoint   string
+	CORSOrigins       []string
 }
 
 func Load() (Config, error) {
@@ -51,6 +52,17 @@ func Load() (Config, error) {
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
+	}
+	// Parse CORS origins from comma-separated env var
+	if origins := optional("CORS_ORIGINS"); origins != "" {
+		cfg.CORSOrigins = strings.Split(origins, ",")
+	} else {
+		// Default to localhost origins for development
+		cfg.CORSOrigins = []string{
+			"http://localhost:3000",
+			"http://localhost:19006",
+			"http://localhost:8081",
+		}
 	}
 	return cfg, nil
 }

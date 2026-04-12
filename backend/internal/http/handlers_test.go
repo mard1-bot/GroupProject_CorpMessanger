@@ -29,6 +29,9 @@ func (s testStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
 }
 func (s testStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
 func (s testStorage) CreateChat(ctx context.Context, chat *models.Chat) error { return nil }
+func (s testStorage) CreateChatWithMembers(ctx context.Context, chat *models.Chat, members []*models.ChatMember) error {
+	return nil
+}
 func (s testStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
 	return nil, nil
 }
@@ -40,6 +43,9 @@ func (s testStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*m
 	return nil, nil
 }
 func (s testStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
+func (s testStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
+	return nil, nil
+}
 func (s testStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }
@@ -54,7 +60,7 @@ type testEjabberd struct{ err error }
 func (e testEjabberd) Ready(context.Context) error { return e.err }
 func (e testEjabberd) Close() error                { return nil }
 func TestHealth(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret")
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/health", nil)
 	h.ServeHTTP(rr, req)
@@ -63,7 +69,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 func TestReady(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret")
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"})
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/ready", nil)
 	h.ServeHTTP(rr, req)

@@ -1,19 +1,39 @@
 import { Platform } from 'react-native';
 
-// Configuration: Update this to match your backend setup
-// For physical device testing, use your computer's local IP address
+// Configuration: Set EXPO_PUBLIC_BACKEND_IP to your computer's local IP address
 // You can find it with: ipconfig (Windows) or ifconfig (Mac/Linux)
-const COMPUTER_IP = process.env.EXPO_PUBLIC_BACKEND_IP || '192.168.0.103';
+// For production, set EXPO_PUBLIC_BACKEND_URL to your deployed backend URL
+
+const BACKEND_IP = process.env.EXPO_PUBLIC_BACKEND_IP;
+const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const BACKEND_PORT = process.env.EXPO_PUBLIC_BACKEND_PORT || '3000';
 const USE_LOCALHOST = process.env.EXPO_PUBLIC_USE_LOCALHOST === 'true';
+
+if (!BACKEND_URL && !BACKEND_IP && !USE_LOCALHOST) {
+  console.error(
+    '[API] ERROR: Missing backend configuration.\n' +
+    'Set one of the following environment variables:\n' +
+    '- EXPO_PUBLIC_BACKEND_URL: Full backend URL (production)\n' +
+    '- EXPO_PUBLIC_BACKEND_IP: Your computer IP for development\n' +
+    '- EXPO_PUBLIC_USE_LOCALHOST=true: Use localhost (simulator only)'
+  );
+}
+
+// Build base URL
+const getBaseURL = (): string => {
+  if (BACKEND_URL) return BACKEND_URL;
+  
+  const host = USE_LOCALHOST ? 'localhost' : (BACKEND_IP || 'localhost');
+  return `http://${host}:${BACKEND_PORT}`;
+};
 
 // API URL - automatically selects the correct URL for each platform
 const API_URL = Platform.select({
   ios: USE_LOCALHOST 
     ? `http://localhost:${BACKEND_PORT}` 
-    : `http://${COMPUTER_IP}:${BACKEND_PORT}`,     // iOS Simulator
-  android: `http://${COMPUTER_IP}:${BACKEND_PORT}`, // Android (physical device) - use IP
-  default: `http://localhost:${BACKEND_PORT}`, // Web / fallback
+    : (BACKEND_URL || `http://${BACKEND_IP || 'localhost'}:${BACKEND_PORT}`),
+  android: BACKEND_URL || `http://${BACKEND_IP || '10.0.2.2'}:${BACKEND_PORT}`,
+  default: BACKEND_URL || `http://localhost:${BACKEND_PORT}`,
 });
 
 // For Android Emulator use: 'http://10.0.2.2:8080'

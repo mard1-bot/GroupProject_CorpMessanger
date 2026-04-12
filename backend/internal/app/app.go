@@ -46,15 +46,17 @@ func New() (*App, error) {
 
 	jwtSecret := cfg.JWTSecret
 	if jwtSecret == "" {
-		jwtSecret = "default-secret-change-me-in-production"
-		logg.Warn("using default JWT secret, change JWT_SECRET in production")
+		return nil, fmt.Errorf("JWT_SECRET is required")
 	}
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret)
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           handler,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MB
 	}
 	return &App{Config: cfg, Logger: logg, Server: server, Storage: stg, Ejabberd: ejb}, nil
 }

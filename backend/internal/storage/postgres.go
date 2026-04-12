@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -24,8 +25,12 @@ func NewPostgres(dsn string) (*PostgresStorage, error) {
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(5 * time.Minute)
+	db.SetConnMaxIdleTime(1 * time.Minute)
 
-	if err := db.Ping(); err != nil {
+	// Use context with timeout for Ping to avoid indefinite hang
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
@@ -113,6 +118,8 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_chat_members_user_id ON chat_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_chat_members_chat_id ON chat_members(chat_id);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages(sender_id);
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to);
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
@@ -132,9 +139,16 @@ func (s *PostgresStorage) Close() error {
 func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User, passwordHash string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	// Handle rollback with error check
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				err = fmt.Errorf("rollback failed: %v (original error: %w)", rbErr, err)
+			}
+		}
+	}()
 
 	query := `
 		INSERT INTO users (email, phone, first_name, last_name, middle_name, avatar, status, role)
@@ -155,7 +169,10 @@ func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User, pas
 		return fmt.Errorf("insert credentials: %w", err)
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*models.User, string, error) {
@@ -175,7 +192,7 @@ func (s *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*mo
 		&user.CreatedAt, &user.UpdatedAt, &passwordHash,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, "", nil
 		}
 		return nil, "", err
@@ -197,7 +214,7 @@ func (s *PostgresStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model
 		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
@@ -205,14 +222,34 @@ func (s *PostgresStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model
 	return user, nil
 }
 
+func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) error {
+	query := `
+		UPDATE users SET
+			email = $1, phone = $2, first_name = $3, last_name = $4,
+			middle_name = $5, avatar = $6, status = $7, role = $8,
+			updated_at = NOW()
+		WHERE id = $9
+		RETURNING updated_at
+	`
+	err := s.db.QueryRowContext(ctx, query,
+		user.Email, user.Phone, user.FirstName, user.LastName,
+		user.MiddleName, user.Avatar, user.Status, user.Role,
+		user.ID,
+	).Scan(&user.UpdatedAt)
+	return err
+}
+
 func (s *PostgresStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
+	// Default limit to prevent unbounded results
+	const defaultLimit = 100
 	query := `
 		SELECT id, email, phone, first_name, last_name, middle_name,
 		       avatar, status, role, created_at, updated_at
 		FROM users WHERE status = 'active'
 		ORDER BY created_at DESC
+		LIMIT $1
 	`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, defaultLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -234,18 +271,6 @@ func (s *PostgresStorage) GetUsers(ctx context.Context) ([]*models.User, error) 
 	return users, rows.Err()
 }
 
-func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) error {
-	query := `
-		UPDATE users
-		SET first_name = $1, last_name = $2, middle_name = $3, phone = $4, avatar = $5, updated_at = NOW()
-		WHERE id = $6
-		RETURNING updated_at
-	`
-	return s.db.QueryRowContext(ctx, query,
-		user.FirstName, user.LastName, user.MiddleName, user.Phone, user.Avatar, user.ID,
-	).Scan(&user.UpdatedAt)
-}
-
 func (s *PostgresStorage) CreateChat(ctx context.Context, chat *models.Chat) error {
 	query := `
 		INSERT INTO chats (type, title, description, avatar, creator_id)
@@ -255,6 +280,53 @@ func (s *PostgresStorage) CreateChat(ctx context.Context, chat *models.Chat) err
 	return s.db.QueryRowContext(ctx, query,
 		chat.Type, chat.Title, chat.Description, chat.Avatar, chat.CreatorID,
 	).Scan(&chat.ID, &chat.CreatedAt, &chat.UpdatedAt)
+}
+
+func (s *PostgresStorage) CreateChatWithMembers(ctx context.Context, chat *models.Chat, members []*models.ChatMember) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	// Handle rollback with error check
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil {
+				err = fmt.Errorf("rollback failed: %v (original error: %w)", rbErr, err)
+			}
+		}
+	}()
+
+	// Create chat
+	chatQuery := `
+		INSERT INTO chats (type, title, description, avatar, creator_id)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at, updated_at
+	`
+	err = tx.QueryRowContext(ctx, chatQuery,
+		chat.Type, chat.Title, chat.Description, chat.Avatar, chat.CreatorID,
+	).Scan(&chat.ID, &chat.CreatedAt, &chat.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("create chat: %w", err)
+	}
+
+	// Add members
+	memberQuery := `
+		INSERT INTO chat_members (chat_id, user_id, role)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (chat_id, user_id) DO UPDATE SET role = $3
+	`
+	for _, member := range members {
+		member.ChatID = chat.ID
+		_, err = tx.ExecContext(ctx, memberQuery, member.ChatID, member.UserID, member.Role)
+		if err != nil {
+			return fmt.Errorf("add member %s: %w", member.UserID, err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 func (s *PostgresStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
@@ -268,7 +340,7 @@ func (s *PostgresStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*model
 		&chat.CreatorID, &chat.CreatedAt, &chat.UpdatedAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
@@ -349,6 +421,32 @@ func (s *PostgresStorage) CreateMessage(ctx context.Context, msg *models.Message
 	).Scan(&msg.ID, &msg.CreatedAt, &msg.UpdatedAt)
 }
 
+func (s *PostgresStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
+	msg := &models.Message{}
+	query := `
+		SELECT id, chat_id, sender_id, type, content, created_at, updated_at, reply_to
+		FROM messages WHERE id = $1
+	`
+	var replyTo sql.NullString
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
+		&msg.ID, &msg.ChatID, &msg.SenderID, &msg.Type, &msg.Content,
+		&msg.CreatedAt, &msg.UpdatedAt, &replyTo,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if replyTo.Valid {
+		replyID, err := uuid.Parse(replyTo.String)
+		if err == nil {
+			msg.ReplyTo = &replyID
+		}
+	}
+	return msg, nil
+}
+
 func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	query := `
 		SELECT id, chat_id, sender_id, type, content, created_at, updated_at, reply_to
@@ -406,7 +504,7 @@ func (s *PostgresStorage) GetSessionByToken(ctx context.Context, token string) (
 		&session.IP, &session.CreatedAt, &session.ExpiresAt,
 	)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err

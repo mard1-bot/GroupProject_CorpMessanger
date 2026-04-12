@@ -56,46 +56,34 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		CreatorID:   claims.UserID,
 	}
 
-	if err := h.storage.CreateChat(r.Context(), chat); err != nil {
-		h.logger.Error("failed to create chat", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create chat")
-		return
-	}
-
-	ownerMember := &models.ChatMember{
-		ChatID: chat.ID,
+	// Build members list (owner + additional members)
+	var membersList []*models.ChatMember
+	membersList = append(membersList, &models.ChatMember{
 		UserID: claims.UserID,
 		Role:   models.ChatRoleOwner,
-	}
-	if err := h.storage.AddChatMember(r.Context(), ownerMember); err != nil {
-		h.logger.Error("failed to add creator as member", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to add creator as member")
-		return
-	}
+	})
 
-	// Validate and collect member IDs first
-	var memberIDs []uuid.UUID
+	// Validate and collect additional member IDs
 	for _, memberIDStr := range req.MemberIDs {
 		memberID, err := uuid.Parse(memberIDStr)
 		if err != nil {
 			WriteError(w, http.StatusBadRequest, "invalid_member_id", "Invalid member ID: "+memberIDStr)
 			return
 		}
-		memberIDs = append(memberIDs, memberID)
+		// Don't add creator twice if they're in the member list
+		if memberID != claims.UserID {
+			membersList = append(membersList, &models.ChatMember{
+				UserID: memberID,
+				Role:   models.ChatRoleMember,
+			})
+		}
 	}
 
-	// Add members (N+1 problem - should be batch insert in production)
-	for _, memberID := range memberIDs {
-		member := &models.ChatMember{
-			ChatID: chat.ID,
-			UserID: memberID,
-			Role:   models.ChatRoleMember,
-		}
-		if err := h.storage.AddChatMember(r.Context(), member); err != nil {
-			h.logger.Error("failed to add member", "error", err, "member_id", memberID)
-			WriteError(w, http.StatusInternalServerError, "internal", "Failed to add member")
-			return
-		}
+	// Atomic creation: chat + members in one transaction
+	if err := h.storage.CreateChatWithMembers(r.Context(), chat, membersList); err != nil {
+		h.logger.Error("failed to create chat with members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create chat")
+		return
 	}
 
 	members, err := h.storage.GetChatMembers(r.Context(), chat.ID)
@@ -236,6 +224,12 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 	// Only owner can assign owner/admin roles
 	if (req.Role == models.ChatRoleOwner || req.Role == models.ChatRoleAdmin) && callerRole != models.ChatRoleOwner {
 		WriteError(w, http.StatusForbidden, "forbidden", "Only chat owner can assign owner or admin roles")
+		return
+	}
+
+	// Check if user is already a member
+	if isChatMember(members, userID) {
+		WriteError(w, http.StatusConflict, "already_member", "User is already a member of this chat")
 		return
 	}
 

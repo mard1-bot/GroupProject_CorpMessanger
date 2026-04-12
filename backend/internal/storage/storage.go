@@ -28,6 +28,7 @@ type UserStorage interface {
 
 type ChatStorage interface {
 	CreateChat(ctx context.Context, chat *models.Chat) error
+	CreateChatWithMembers(ctx context.Context, chat *models.Chat, members []*models.ChatMember) error
 	GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error)
 	GetUserChats(ctx context.Context, userID uuid.UUID) ([]*models.Chat, error)
 	AddChatMember(ctx context.Context, member *models.ChatMember) error
@@ -36,6 +37,7 @@ type ChatStorage interface {
 
 type MessageStorage interface {
 	CreateMessage(ctx context.Context, msg *models.Message) error
+	GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error)
 	GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error)
 }
 
@@ -68,6 +70,9 @@ func (s *StubStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
 }
 func (s *StubStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
 func (s *StubStorage) CreateChat(ctx context.Context, chat *models.Chat) error { return nil }
+func (s *StubStorage) CreateChatWithMembers(ctx context.Context, chat *models.Chat, members []*models.ChatMember) error {
+	return nil
+}
 func (s *StubStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
 	return nil, nil
 }
@@ -79,6 +84,9 @@ func (s *StubStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*
 	return nil, nil
 }
 func (s *StubStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
+func (s *StubStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
+	return nil, nil
+}
 func (s *StubStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }

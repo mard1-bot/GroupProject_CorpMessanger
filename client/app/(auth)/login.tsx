@@ -52,6 +52,7 @@ export default function LoginScreen() {
           autoCapitalize="none"
           autoComplete="email"
           keyboardType="email-address"
+          editable={!isLoading}
         />
         <TextInput
           style={[styles.input, { color: textColor, backgroundColor: surfaceColor, borderColor }]}
@@ -61,13 +62,17 @@ export default function LoginScreen() {
           onChangeText={setPassword}
           secureTextEntry
           autoComplete="password"
+          editable={!isLoading}
         />
         {error ? <ThemedText style={styles.error}>{error}</ThemedText> : null}
         <TouchableOpacity
-          style={[styles.button, { backgroundColor: primaryColor }]}
+          style={[styles.button, { backgroundColor: primaryColor }, isLoading && styles.buttonDisabled]}
           onPress={handleLogin}
+          disabled={isLoading}
           activeOpacity={0.8}>
-          <ThemedText style={styles.buttonText}>Войти</ThemedText>
+          <ThemedText style={styles.buttonText}>
+            {isLoading ? 'Вход...' : 'Войти'}
+          </ThemedText>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.linkButton}
@@ -94,6 +99,7 @@ const styles = StyleSheet.create({
   },
   error: { color: '#c53030', marginBottom: 12, fontSize: 14 },
   button: { borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 8 },
+  buttonDisabled: { opacity: 0.6 },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   linkButton: { marginTop: 24, alignItems: 'center' },
 });

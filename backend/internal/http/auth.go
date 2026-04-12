@@ -3,19 +3,23 @@ package http
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
+	"net/mail"
 	"strings"
 	"time"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/storage"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// emailRegex is a basic email validation pattern
-var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+// isValidEmail uses net/mail for RFC-compliant validation
+func isValidEmail(email string) bool {
+	addr, err := mail.ParseAddress(email)
+	return err == nil && addr.Address == email
+}
 
 type RegisterRequest struct {
 	Email      string `json:"email"`
@@ -48,7 +52,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !emailRegex.MatchString(req.Email) {
+	if !isValidEmail(req.Email) {
 		WriteError(w, http.StatusBadRequest, "invalid_email", "Invalid email format")
 		return
 	}
@@ -213,7 +217,7 @@ func (h *Handler) getCurrentUser(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, user)
 }
 
-func AuthMiddleware(jwtService *auth.JWTService) func(http.Handler) http.Handler {
+func AuthMiddleware(jwtService *auth.JWTService, sessionStorage storage.SessionStorage) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -227,6 +231,19 @@ func AuthMiddleware(jwtService *auth.JWTService) func(http.Handler) http.Handler
 			if err != nil {
 				WriteError(w, http.StatusUnauthorized, "invalid_token", "Invalid or expired token")
 				return
+			}
+
+			// Verify session exists and hasn't expired in database
+			if sessionStorage != nil {
+				session, err := sessionStorage.GetSessionByToken(r.Context(), token)
+				if err != nil {
+					WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate session")
+					return
+				}
+				if session == nil {
+					WriteError(w, http.StatusUnauthorized, "session_expired", "Session has been revoked or expired")
+					return
+				}
 			}
 
 			ctx := auth.ContextWithClaims(r.Context(), claims)

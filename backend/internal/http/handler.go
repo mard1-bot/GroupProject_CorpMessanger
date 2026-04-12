@@ -15,25 +15,33 @@ import (
 )
 
 type Handler struct {
-	logger   *slog.Logger
-	storage  storage.Storage
-	ejabberd ejabberd.Client
-	jwt      *auth.JWTService
+	logger      *slog.Logger
+	storage     storage.Storage
+	ejabberd    ejabberd.Client
+	jwt         *auth.JWTService
+	corsOrigins map[string]bool
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string) stdhttp.Handler {
+	// Build CORS origins map
+	originsMap := make(map[string]bool)
+	for _, origin := range corsOrigins {
+		originsMap[origin] = true
+	}
+
 	h := &Handler{
-		logger:   logger,
-		storage:  storage,
-		ejabberd: ejabberd,
-		jwt:      auth.NewJWTService(jwtSecret),
+		logger:      logger,
+		storage:     storage,
+		ejabberd:    ejabberd,
+		jwt:         auth.NewJWTService(jwtSecret),
+		corsOrigins: originsMap,
 	}
 
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(corsMiddleware)
+	r.Use(h.corsMiddleware)
 	r.Use(AccessLogMiddleware(logger))
 	r.Use(RecoverMiddleware(logger))
 	r.Use(middleware.StripSlashes)
@@ -46,7 +54,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		r.Post("/auth/login", h.login)
 
 		r.Group(func(r chi.Router) {
-			r.Use(AuthMiddleware(h.jwt))
+			r.Use(AuthMiddleware(h.jwt, h.storage))
 
 			r.Post("/auth/logout", h.logout)
 			r.Get("/auth/me", h.getCurrentUser)
@@ -70,19 +78,12 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	return r
 }
 
-// allowedOrigins is a whitelist of trusted origins for CORS
-var allowedOrigins = map[string]bool{
-	"http://localhost:3000":  true,
-	"http://localhost:19006": true, // Expo web
-	"http://localhost:8081":  true, // Expo metro
-}
-
-func corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
+func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := r.Header.Get("Origin")
 
 		// Only set CORS headers for whitelisted origins
-		if allowedOrigins[origin] {
+		if h.corsOrigins[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
