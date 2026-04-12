@@ -7,7 +7,6 @@ import (
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
-	"corp-messenger/backend/internal/storage"
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
