@@ -20,6 +20,9 @@ export default function ProfileScreen() {
   const textColor = useThemeColor({}, 'text');
   const isDark = useColorScheme() === 'dark';
   const selectedOptionTextColor = isDark ? '#fff' : Colors.light.text;
+  const bgColor = useThemeColor({}, 'background');
+  
+  console.log('[Profile] colorScheme:', colorScheme, 'isDark:', isDark, 'bgColor:', bgColor);
 
   const initials = currentUser?.name
     ? currentUser.name.split(' ').map((n) => n[0]).join('').slice(0, 2)
@@ -35,8 +38,6 @@ export default function ProfileScreen() {
     { value: 'dark', label: 'Тёмная' },
     { value: 'system', label: 'Системная' },
   ];
-
-  const bgColor = useThemeColor({}, 'background');
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={['top']}>
