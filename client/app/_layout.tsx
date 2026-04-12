@@ -12,6 +12,7 @@ export const unstable_settings = {
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
+  console.log('[RootLayout] colorScheme:', colorScheme);
 
   return (
     <AuthProvider>
