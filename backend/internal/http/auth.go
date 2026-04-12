@@ -43,8 +43,8 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _, err := h.storage.GetUserByEmail(r.Context(), req.Email)
-	if err == nil {
+	existingUser, _, _ := h.storage.GetUserByEmail(r.Context(), req.Email)
+	if existingUser != nil {
 		WriteError(w, http.StatusConflict, "email_exists", "User with this email already exists")
 		return
 	}

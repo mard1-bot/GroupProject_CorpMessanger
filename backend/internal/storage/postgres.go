@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"fmt"
 	"time"
 
@@ -12,9 +11,6 @@ import (
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
-
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
 
 type PostgresStorage struct {
 	db *sql.DB
@@ -236,6 +232,18 @@ func (s *PostgresStorage) GetUsers(ctx context.Context) ([]*models.User, error) 
 		users = append(users, user)
 	}
 	return users, rows.Err()
+}
+
+func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) error {
+	query := `
+		UPDATE users
+		SET first_name = $1, last_name = $2, middle_name = $3, phone = $4, avatar = $5, updated_at = NOW()
+		WHERE id = $6
+		RETURNING updated_at
+	`
+	return s.db.QueryRowContext(ctx, query,
+		user.FirstName, user.LastName, user.MiddleName, user.Phone, user.Avatar, user.ID,
+	).Scan(&user.UpdatedAt)
 }
 
 func (s *PostgresStorage) CreateChat(ctx context.Context, chat *models.Chat) error {

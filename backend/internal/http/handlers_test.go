@@ -27,6 +27,7 @@ func (s testStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.Use
 func (s testStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
 	return nil, nil
 }
+func (s testStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
 func (s testStorage) CreateChat(ctx context.Context, chat *models.Chat) error { return nil }
 func (s testStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
 	return nil, nil

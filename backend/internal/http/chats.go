@@ -76,7 +76,12 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	members, _ := h.storage.GetChatMembers(r.Context(), chat.ID)
+	members, err := h.storage.GetChatMembers(r.Context(), chat.ID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
 
 	WriteJSON(w, http.StatusCreated, ChatResponse{Chat: chat, Members: members})
 }
@@ -123,7 +128,12 @@ func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, _ := h.storage.GetChatMembers(r.Context(), chatID)
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
 
 	isMember := false
 	for _, m := range members {
@@ -173,7 +183,13 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		req.Role = models.ChatRoleMember
 	}
 
-	members, _ := h.storage.GetChatMembers(r.Context(), chatID)
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
 	isMember := false
 	for _, m := range members {
 		if m.UserID == claims.UserID {

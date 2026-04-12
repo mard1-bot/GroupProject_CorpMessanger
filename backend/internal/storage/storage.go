@@ -23,6 +23,7 @@ type UserStorage interface {
 	GetUserByEmail(ctx context.Context, email string) (*models.User, string, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetUsers(ctx context.Context) ([]*models.User, error)
+	UpdateUser(ctx context.Context, user *models.User) error
 }
 
 type ChatStorage interface {
@@ -65,6 +66,7 @@ func (s *StubStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.Us
 func (s *StubStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
 	return nil, nil
 }
+func (s *StubStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
 func (s *StubStorage) CreateChat(ctx context.Context, chat *models.Chat) error { return nil }
 func (s *StubStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*models.Chat, error) {
 	return nil, nil

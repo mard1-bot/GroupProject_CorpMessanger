@@ -82,5 +82,11 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		user.Avatar = updates.Avatar
 	}
 
+	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
+		h.logger.Error("failed to update user", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update user")
+		return
+	}
+
 	WriteJSON(w, http.StatusOK, user)
 }

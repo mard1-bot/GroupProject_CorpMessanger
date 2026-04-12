@@ -36,7 +36,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.DBDSN = optional("DB_DSN")
-	cfg.JWTSecret = optional("JWT_SECRET")
+	if cfg.JWTSecret, err = required("JWT_SECRET"); err != nil {
+		return Config{}, err
+	}
 	cfg.EjabberdHost = optional("EJABBERD_HOST")
 	cfg.EjabberdAPISecret = optional("EJABBERD_API_SECRET")
 	cfg.StorageEndpoint = optional("STORAGE_ENDPOINT")
