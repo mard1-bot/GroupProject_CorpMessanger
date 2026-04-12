@@ -160,7 +160,7 @@ class ApiClient {
       }
 
       if (response.status === 204) {
-        return { data: undefined as T };
+        return { data: null as unknown as T };
       }
 
       if (isJson) {

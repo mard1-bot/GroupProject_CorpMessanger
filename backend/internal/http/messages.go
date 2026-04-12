@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
@@ -38,10 +39,12 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	if req.Content == "" {
-		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required")
+	trimmedContent := strings.TrimSpace(req.Content)
+	if trimmedContent == "" {
+		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required (cannot be empty or only whitespace)")
 		return
 	}
+	req.Content = trimmedContent
 
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {

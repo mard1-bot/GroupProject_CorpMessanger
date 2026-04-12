@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
 
 CREATE TABLE IF NOT EXISTS user_credentials (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -137,7 +138,7 @@ func (s *PostgresStorage) Close() error {
 	return s.db.Close()
 }
 
-func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User, passwordHash string) error {
+func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User, passwordHash string) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -146,7 +147,7 @@ func (s *PostgresStorage) CreateUser(ctx context.Context, user *models.User, pas
 	defer func() {
 		if err != nil {
 			if rbErr := tx.Rollback(); rbErr != nil {
-				err = fmt.Errorf("rollback failed: %v (original error: %w)", rbErr, err)
+				err = fmt.Errorf("transaction error: %w; rollback failed: %v", err, rbErr)
 			}
 		}
 	}()

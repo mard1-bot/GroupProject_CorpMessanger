@@ -43,12 +43,12 @@ type AuthResponse struct {
 }
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
-	defer r.Body.Close()
 
 	if req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
 		WriteError(w, http.StatusBadRequest, "missing_fields", "Email, password, first_name and last_name are required")
@@ -137,25 +137,23 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up old sessions for this user (keep only 5 most recent)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.storage.DeleteOldSessionsForUser(ctx, user.ID, 5); err != nil {
-			h.logger.Error("failed to cleanup old sessions", "error", err)
-		}
-	}()
+	// Clean up old sessions for this user (keep only 5 most recent) - synchronous to avoid goroutine leak
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.storage.DeleteOldSessionsForUser(cleanupCtx, user.ID, 5); err != nil {
+		h.logger.Error("failed to cleanup old sessions", "error", err)
+	}
 
 	WriteJSON(w, http.StatusCreated, AuthResponse{Token: token, User: user})
 }
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
-	defer r.Body.Close()
 
 	if req.Email == "" || req.Password == "" {
 		WriteError(w, http.StatusBadRequest, "missing_fields", "Email and password are required")
@@ -199,14 +197,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up old sessions for this user (keep only 5 most recent)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.storage.DeleteOldSessionsForUser(ctx, user.ID, 5); err != nil {
-			h.logger.Error("failed to cleanup old sessions", "error", err)
-		}
-	}()
+	// Clean up old sessions for this user (keep only 5 most recent) - synchronous to avoid goroutine leak
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.storage.DeleteOldSessionsForUser(cleanupCtx, user.ID, 5); err != nil {
+		h.logger.Error("failed to cleanup old sessions", "error", err)
+	}
 
 	WriteJSON(w, http.StatusOK, AuthResponse{Token: token, User: user})
 }
@@ -266,7 +262,7 @@ func AuthMiddleware(jwtService *auth.JWTService, sessionStorage storage.SessionS
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" || len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+			if !strings.HasPrefix(authHeader, "Bearer ") || len(authHeader) <= 7 {
 				WriteError(w, http.StatusUnauthorized, "unauthorized", "Missing or invalid authorization header")
 				return
 			}

@@ -124,24 +124,18 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate FirstName - cannot be empty after trimming
-	if updates.FirstName != "" {
-		if trimmed := strings.TrimSpace(updates.FirstName); trimmed == "" {
-			WriteError(w, http.StatusBadRequest, "invalid_first_name", "First name cannot be empty")
-			return
-		} else {
-			user.FirstName = trimmed
-		}
+	// Validate FirstName - cannot be empty after trimming (already trimmed above)
+	if updates.FirstName == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_first_name", "First name cannot be empty")
+		return
 	}
-	// Validate LastName - cannot be empty after trimming
-	if updates.LastName != "" {
-		if trimmed := strings.TrimSpace(updates.LastName); trimmed == "" {
-			WriteError(w, http.StatusBadRequest, "invalid_last_name", "Last name cannot be empty")
-			return
-		} else {
-			user.LastName = trimmed
-		}
+	user.FirstName = updates.FirstName
+	// Validate LastName - cannot be empty after trimming (already trimmed above)
+	if updates.LastName == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_last_name", "Last name cannot be empty")
+		return
 	}
+	user.LastName = updates.LastName
 	if updates.MiddleName != "" {
 		user.MiddleName = strings.TrimSpace(updates.MiddleName)
 	}

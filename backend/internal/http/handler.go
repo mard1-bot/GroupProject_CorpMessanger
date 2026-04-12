@@ -33,23 +33,65 @@ type rateLimitEntry struct {
 }
 
 var (
-	rateLimits   = make(map[string]*rateLimitEntry)
-	rateLimitMux sync.RWMutex
+	rateLimits          = make(map[string]*rateLimitEntry)
+	rateLimitMux        sync.RWMutex
+	maxRateLimitEntries = 10000 // Hard limit to prevent memory exhaustion
 )
+
+// getClientIP extracts client IP with proxy-aware validation
+func getClientIP(r *stdhttp.Request) string {
+	// Prefer X-Forwarded-For but only take first IP (closest to client)
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		// Take only the first IP in the chain
+		if idx := strings.Index(forwarded, ","); idx != -1 {
+			forwarded = forwarded[:idx]
+		}
+		forwarded = strings.TrimSpace(forwarded)
+		// Basic validation: must look like IP
+		if strings.Contains(forwarded, ".") || strings.Contains(forwarded, ":") {
+			return forwarded
+		}
+	}
+	// Fall back to RemoteAddr, stripping port if present
+	ip := r.RemoteAddr
+	if idx := strings.LastIndex(ip, ":"); idx != -1 {
+		ip = ip[:idx]
+	}
+	return ip
+}
 
 // Simple rate limiter: 5 requests per minute per IP
 func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
-		ip := r.RemoteAddr
-		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-			ip = forwarded
-		}
-
-		rateLimitMux.Lock()
-		entry, exists := rateLimits[ip]
+		ip := getClientIP(r)
 		now := time.Now()
 
-		if !exists || now.After(entry.resetTime) {
+		rateLimitMux.Lock()
+
+		// Clean up expired entry if exists
+		entry, exists := rateLimits[ip]
+		if exists && now.After(entry.resetTime) {
+			delete(rateLimits, ip)
+			exists = false
+		}
+
+		// Create new entry if needed, with size limit enforcement
+		if !exists {
+			// Evict oldest entries if at capacity (simple eviction: clear expired entries first)
+			if len(rateLimits) >= maxRateLimitEntries {
+				for k, v := range rateLimits {
+					if now.After(v.resetTime) {
+						delete(rateLimits, k)
+					}
+				}
+				// If still at capacity, refuse new entries (defensive)
+				if len(rateLimits) >= maxRateLimitEntries {
+					rateLimitMux.Unlock()
+					WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Server overloaded, please try again later")
+					return
+				}
+			}
+
 			rateLimits[ip] = &rateLimitEntry{
 				count:     1,
 				resetTime: now.Add(time.Minute),
@@ -59,6 +101,7 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 			return
 		}
 
+		// Increment count atomically under lock
 		entry.count++
 		count := entry.count
 		rateLimitMux.Unlock()
@@ -76,7 +119,15 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	// Build CORS origins map (lowercase for case-insensitive comparison)
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
-		originsMap[strings.ToLower(origin)] = true
+		origin = strings.ToLower(origin)
+		// Validate origin format: must start with http:// or https:// and not contain path
+		if strings.HasPrefix(origin, "http://") || strings.HasPrefix(origin, "https://") {
+			// Strip any path component - only keep scheme://host:port
+			if idx := strings.Index(origin[8:], "/"); idx != -1 {
+				origin = origin[:idx+8]
+			}
+			originsMap[origin] = true
+		}
 	}
 
 	h := &Handler{
@@ -87,21 +138,6 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		corsOrigins:     originsMap,
 		sessionDuration: sessionDuration,
 	}
-
-	// Clean up old rate limit entries periodically
-	go func() {
-		for {
-			time.Sleep(10 * time.Minute)
-			now := time.Now()
-			rateLimitMux.Lock()
-			for ip, entry := range rateLimits {
-				if now.After(entry.resetTime) {
-					delete(rateLimits, ip)
-				}
-			}
-			rateLimitMux.Unlock()
-		}
-	}()
 
 	r := chi.NewRouter()
 
@@ -148,6 +184,14 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := strings.ToLower(r.Header.Get("Origin"))
+
+		// Validate origin format - must start with http:// or https:// and not contain path
+		if origin != "" && (!strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") ||
+			strings.Contains(origin[7:], "/") || // path after http://
+			strings.Contains(origin[8:], "/")) { // path after https://
+			// Invalid origin format - treat as no origin
+			origin = ""
+		}
 
 		// Only set CORS headers for whitelisted origins (case-insensitive)
 		if h.corsOrigins[origin] {

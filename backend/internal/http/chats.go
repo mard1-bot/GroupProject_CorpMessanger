@@ -1,7 +1,9 @@
 package http
 
 import (
+	"html"
 	"net/http"
+	"strings"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
@@ -47,7 +49,8 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	if req.Type == "" {
-		req.Type = models.ChatTypeDirect
+		WriteError(w, http.StatusBadRequest, "missing_chat_type", "Chat type is required (direct or group)")
+		return
 	}
 
 	// Validate input lengths to prevent DoS and XSS
@@ -62,10 +65,14 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sanitize inputs to prevent XSS
+	sanitizedTitle := html.EscapeString(strings.TrimSpace(req.Title))
+	sanitizedDescription := html.EscapeString(strings.TrimSpace(req.Description))
+
 	chat := &models.Chat{
 		Type:        req.Type,
-		Title:       req.Title,
-		Description: req.Description,
+		Title:       sanitizedTitle,
+		Description: sanitizedDescription,
 		CreatorID:   claims.UserID,
 	}
 
