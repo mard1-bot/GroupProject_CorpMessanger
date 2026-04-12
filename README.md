@@ -146,4 +146,3 @@ GroupProject_CorpMessanger/
 ├── client/   # frontend на React Native
 ├── backend/  # backend на Go
 └── README.md
-
