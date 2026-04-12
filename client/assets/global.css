@@ -1,0 +1,65 @@
+/* CSS Variables for theming */
+:root {
+  /* Light theme (default) */
+  --color-background: #F6F8FF;
+  --color-surface: #FFFFFF;
+  --color-primary: #3A8BFF;
+  --color-primary-gradient-start: #4DA3FF;
+  --color-primary-gradient-end: #8B5CFF;
+  --color-text: #1F2937;
+  --color-text-secondary: #6B7280;
+  --color-border: #E5E7EB;
+  --color-hover: #2C7BFF;
+  --color-message-outgoing: #E9F2FF;
+  --color-message-incoming: #F3F4F6;
+  --color-tint: #3A8BFF;
+  --color-icon: #6B7280;
+}
+
+/* Dark theme via data attribute (manual override) */
+[data-theme="dark"] {
+  --color-background: #0F1117;
+  --color-surface: #1A1D26;
+  --color-primary: #4DA3FF;
+  --color-primary-gradient-start: #4DA3FF;
+  --color-primary-gradient-end: #8B5CFF;
+  --color-text: #F3F4F6;
+  --color-text-secondary: #9CA3AF;
+  --color-border: #2A2F3A;
+  --color-hover: #3A8BFF;
+  --color-message-outgoing: #1E3A8A;
+  --color-message-incoming: #232734;
+  --color-tint: #4DA3FF;
+  --color-icon: #9CA3AF;
+}
+
+/* System dark theme (auto via media query) */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-background: #0F1117;
+    --color-surface: #1A1D26;
+    --color-primary: #4DA3FF;
+    --color-primary-gradient-start: #4DA3FF;
+    --color-primary-gradient-end: #8B5CFF;
+    --color-text: #F3F4F6;
+    --color-text-secondary: #9CA3AF;
+    --color-border: #2A2F3A;
+    --color-hover: #3A8BFF;
+    --color-message-outgoing: #1E3A8A;
+    --color-message-incoming: #232734;
+    --color-tint: #4DA3FF;
+    --color-icon: #9CA3AF;
+  }
+}
+
+/* Global styles */
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-background);
+  color: var(--color-text);
+}
