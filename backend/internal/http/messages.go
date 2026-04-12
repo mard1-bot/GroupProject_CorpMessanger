@@ -79,6 +79,13 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate message content size (prevent DoS)
+	const maxMessageContentSize = 10000 // 10KB
+	if len(req.Content) > maxMessageContentSize {
+		WriteError(w, http.StatusBadRequest, "content_too_large", "Message content exceeds maximum size (10KB)")
+		return
+	}
+
 	msg := &models.Message{
 		ChatID:   chatID,
 		SenderID: claims.UserID,

@@ -223,17 +223,19 @@ func (s *PostgresStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model
 }
 
 func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) error {
+	// Security: Only allow updating safe profile fields
+	// Email, status, and role require separate admin endpoints
 	query := `
 		UPDATE users SET
-			email = $1, phone = $2, first_name = $3, last_name = $4,
-			middle_name = $5, avatar = $6, status = $7, role = $8,
+			phone = $1, first_name = $2, last_name = $3,
+			middle_name = $4, avatar = $5,
 			updated_at = NOW()
-		WHERE id = $9
+		WHERE id = $6
 		RETURNING updated_at
 	`
 	err := s.db.QueryRowContext(ctx, query,
-		user.Email, user.Phone, user.FirstName, user.LastName,
-		user.MiddleName, user.Avatar, user.Status, user.Role,
+		user.Phone, user.FirstName, user.LastName,
+		user.MiddleName, user.Avatar,
 		user.ID,
 	).Scan(&user.UpdatedAt)
 	return err

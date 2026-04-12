@@ -11,9 +11,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// phoneRegex requires at least 10 digits, allows +, spaces, dashes, parentheses
-// Examples: +1234567890, +1 (123) 456-7890, 123-456-7890
-var phoneRegex = regexp.MustCompile(`^[+]?[\s\d\-\(\)]{10,20}$`)
+// phoneRegex requires at least 10 digits, allows +, spaces, dashes, parentheses, dots
+// Examples: +1234567890, +1 (123) 456-7890, +1.202.555.0191
+var phoneRegex = regexp.MustCompile(`^[+]?[\s\d\-\(\)\.]{10,25}$`)
 
 func isValidPhone(phone string) bool {
 	if !phoneRegex.MatchString(phone) {

@@ -49,6 +49,18 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		req.Type = models.ChatTypeDirect
 	}
 
+	// Validate input lengths to prevent DoS and XSS
+	const maxChatTitleLength = 200
+	const maxChatDescriptionLength = 1000
+	if len(req.Title) > maxChatTitleLength {
+		WriteError(w, http.StatusBadRequest, "title_too_long", "Chat title exceeds maximum length (200 characters)")
+		return
+	}
+	if len(req.Description) > maxChatDescriptionLength {
+		WriteError(w, http.StatusBadRequest, "description_too_long", "Chat description exceeds maximum length (1000 characters)")
+		return
+	}
+
 	chat := &models.Chat{
 		Type:        req.Type,
 		Title:       req.Title,
@@ -77,6 +89,12 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 				Role:   models.ChatRoleMember,
 			})
 		}
+	}
+
+	// Validate direct chat has exactly 2 members (creator + 1 other)
+	if chat.Type == models.ChatTypeDirect && len(membersList) != 2 {
+		WriteError(w, http.StatusBadRequest, "invalid_direct_chat", "Direct chats must have exactly 2 members")
+		return
 	}
 
 	// Atomic creation: chat + members in one transaction
@@ -179,6 +197,18 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 	userID, err := uuid.Parse(req.UserID)
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_user_id", "Invalid user ID")
+		return
+	}
+
+	// Verify the target user exists
+	targetUser, err := h.storage.GetUserByID(r.Context(), userID)
+	if err != nil {
+		h.logger.Error("failed to get target user", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify user")
+		return
+	}
+	if targetUser == nil {
+		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
 		return
 	}
 

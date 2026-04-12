@@ -6,6 +6,7 @@ import (
 	"net/mail"
 	"strings"
 	"time"
+	"unicode"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
@@ -62,15 +63,15 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "password_too_short", "Password must be at least 8 characters long")
 		return
 	}
-	// Check for at least one uppercase, one lowercase, one digit
+	// Check for at least one uppercase, one lowercase, one digit (Unicode-aware)
 	var hasUpper, hasLower, hasDigit bool
 	for _, ch := range req.Password {
 		switch {
-		case ch >= 'A' && ch <= 'Z':
+		case unicode.IsUpper(ch):
 			hasUpper = true
-		case ch >= 'a' && ch <= 'z':
+		case unicode.IsLower(ch):
 			hasLower = true
-		case ch >= '0' && ch <= '9':
+		case unicode.IsDigit(ch):
 			hasDigit = true
 		}
 	}
@@ -190,9 +191,32 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
 	authHeader := r.Header.Get("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") && len(authHeader) > 7 {
 		token := authHeader[7:]
+
+		// Verify the session belongs to the current user before deleting
+		session, err := h.storage.GetSessionByToken(r.Context(), token)
+		if err != nil {
+			h.logger.Error("failed to get session", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate session")
+			return
+		}
+		if session == nil {
+			WriteError(w, http.StatusUnauthorized, "session_not_found", "Session not found")
+			return
+		}
+		if session.UserID != claims.UserID {
+			WriteError(w, http.StatusForbidden, "forbidden", "Cannot logout another user's session")
+			return
+		}
+
 		if err := h.storage.DeleteSession(r.Context(), token); err != nil {
 			h.logger.Error("failed to delete session", "error", err)
 			// Don't return error to client, just log it

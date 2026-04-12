@@ -48,6 +48,10 @@ func New() (*App, error) {
 	if jwtSecret == "" {
 		return nil, fmt.Errorf("JWT_SECRET is required")
 	}
+	// Validate minimum secret length for HS256 (32 bytes = 256 bits recommended)
+	if len(jwtSecret) < 32 {
+		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters long for security (HS256)")
+	}
 
 	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins)
 	server := &http.Server{

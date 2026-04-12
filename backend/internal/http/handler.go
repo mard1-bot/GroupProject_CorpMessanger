@@ -88,6 +88,7 @@ func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours cache for preflight
 		}
 		// For requests without origin or unknown origins, no CORS headers are set
 		// This is more secure than wildcard
