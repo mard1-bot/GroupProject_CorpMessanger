@@ -19,7 +19,7 @@ export default function ProfileScreen() {
   const setColorScheme = useThemeStore((s) => s.setColorScheme);
   const textColor = useThemeColor({}, 'text');
   const isDark = useColorScheme() === 'dark';
-  const selectedOptionTextColor = isDark ? Colors.light.text : '#fff';
+  const selectedOptionTextColor = isDark ? '#fff' : Colors.light.text;
 
   const initials = currentUser?.name
     ? currentUser.name.split(' ').map((n) => n[0]).join('').slice(0, 2)
