@@ -12,6 +12,7 @@ import (
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/ejabberd"
 	"corp-messenger/backend/internal/storage"
+	"corp-messenger/backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -24,6 +25,7 @@ type Handler struct {
 	jwt             *auth.JWTService
 	corsOrigins     map[string]bool
 	sessionDuration time.Duration
+	hub             *websocket.Hub
 }
 
 // Rate limiting
@@ -106,7 +108,7 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 		count := entry.count
 		rateLimitMux.Unlock()
 
-		if count > 5 {
+		if count > 20 {
 			WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
 			return
 		}
@@ -115,7 +117,7 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub) stdhttp.Handler {
 	// Build CORS origins map (lowercase for case-insensitive comparison)
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
@@ -137,6 +139,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		jwt:             auth.NewJWTService(jwtSecret),
 		corsOrigins:     originsMap,
 		sessionDuration: sessionDuration,
+		hub:             hub,
 	}
 
 	r := chi.NewRouter()
@@ -150,6 +153,9 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 	r.Get("/health", h.health)
 	r.Get("/ready", h.ready)
+
+	// WebSocket endpoint with auth middleware
+	r.With(AuthMiddleware(h.jwt, h.storage)).Get("/ws", h.handleWebSocket)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Auth endpoints with rate limiting
@@ -173,6 +179,8 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 			r.Post("/chats/{id}/messages", h.sendMessage)
 			r.Get("/chats/{id}/messages", h.getChatMessages)
+			r.Put("/chats/{id}/messages/{msgID}", h.editMessage)
+			r.Delete("/chats/{id}/messages/{msgID}", h.deleteMessage)
 		})
 	})
 
@@ -217,4 +225,34 @@ func decodeJSON(r io.Reader, v interface{}) error {
 	decoder := json.NewDecoder(r)
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(v)
+}
+
+// handleWebSocket handles WebSocket upgrade requests.
+func (h *Handler) handleWebSocket(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	// Handle CORS for WebSocket preflight
+	origin := strings.ToLower(r.Header.Get("Origin"))
+	if h.corsOrigins[origin] {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	}
+
+	// Handle preflight request
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(stdhttp.StatusOK)
+		return
+	}
+
+	// Get claims from context (set by AuthMiddleware)
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok || claims == nil {
+		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Authentication required for WebSocket")
+		return
+	}
+
+	if err := websocket.ServeWs(h.hub, w, r, claims.UserID); err != nil {
+		h.logger.Error("websocket upgrade failed", "error", err)
+		WriteError(w, stdhttp.StatusInternalServerError, "websocket_error", "Failed to upgrade connection")
+		return
+	}
 }

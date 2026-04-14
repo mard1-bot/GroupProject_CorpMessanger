@@ -22,7 +22,7 @@ type UserStorage interface {
 	CreateUser(ctx context.Context, user *models.User, passwordHash string) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, string, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error)
-	GetUsers(ctx context.Context) ([]*models.User, error)
+	GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error)
 	UpdateUser(ctx context.Context, user *models.User) error
 }
 
@@ -33,12 +33,17 @@ type ChatStorage interface {
 	GetUserChats(ctx context.Context, userID uuid.UUID) ([]*models.Chat, error)
 	AddChatMember(ctx context.Context, member *models.ChatMember) error
 	GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error)
+	GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error)
 }
 
 type MessageStorage interface {
 	CreateMessage(ctx context.Context, msg *models.Message) error
 	GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error)
 	GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error)
+	UpdateMessage(ctx context.Context, msg *models.Message) error
+	DeleteMessage(ctx context.Context, id uuid.UUID) error
+	MarkMessageAsRead(ctx context.Context, messageID, userID uuid.UUID) error
+	GetMessageReadStatus(ctx context.Context, messageID uuid.UUID) ([]uuid.UUID, error)
 }
 
 type SessionStorage interface {
@@ -66,7 +71,7 @@ func (s *StubStorage) GetUserByEmail(ctx context.Context, email string) (*models
 func (s *StubStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	return nil, nil
 }
-func (s *StubStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
+func (s *StubStorage) GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error) {
 	return nil, nil
 }
 func (s *StubStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
@@ -84,11 +89,22 @@ func (s *StubStorage) AddChatMember(ctx context.Context, member *models.ChatMemb
 func (s *StubStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
 	return nil, nil
 }
+func (s *StubStorage) GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
+	return nil, nil
+}
 func (s *StubStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
 func (s *StubStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
 	return nil, nil
 }
 func (s *StubStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) UpdateMessage(ctx context.Context, msg *models.Message) error { return nil }
+func (s *StubStorage) DeleteMessage(ctx context.Context, id uuid.UUID) error        { return nil }
+func (s *StubStorage) MarkMessageAsRead(ctx context.Context, messageID, userID uuid.UUID) error {
+	return nil
+}
+func (s *StubStorage) GetMessageReadStatus(ctx context.Context, messageID uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }
 func (s *StubStorage) CreateSession(ctx context.Context, session *models.Session) error { return nil }

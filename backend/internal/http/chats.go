@@ -53,6 +53,12 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate direct chat has exactly 2 members (creator + 1 other)
+	if req.Type == models.ChatTypeDirect && len(req.MemberIDs) != 1 {
+		WriteError(w, http.StatusBadRequest, "invalid_direct_chat", "Direct chat must have exactly 1 other member")
+		return
+	}
+
 	// Validate input lengths to prevent DoS and XSS
 	const maxChatTitleLength = 200
 	const maxChatDescriptionLength = 1000
@@ -181,11 +187,17 @@ func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	// Always load members with user data for API response
+	members, err := h.storage.GetChatMembersWithUsers(r.Context(), chatID)
 	if err != nil {
-		h.logger.Error("failed to get chat members", "error", err)
+		h.logger.Error("failed to get chat members with users", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
+	}
+	if len(members) > 0 {
+		h.logger.Info("getChatById: loaded members", "count", len(members), "first_user", members[0].User)
+	} else {
+		h.logger.Info("getChatById: loaded members", "count", 0)
 	}
 
 	if !isChatMember(members, claims.UserID) {

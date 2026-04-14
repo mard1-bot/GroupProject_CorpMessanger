@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/websocket"
 
 	"github.com/google/uuid"
 )
@@ -25,7 +26,7 @@ func (s testStorage) GetUserByEmail(ctx context.Context, email string) (*models.
 func (s testStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	return nil, nil
 }
-func (s testStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
+func (s testStorage) GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error) {
 	return nil, nil
 }
 func (s testStorage) UpdateUser(ctx context.Context, user *models.User) error { return nil }
@@ -43,11 +44,22 @@ func (s testStorage) AddChatMember(ctx context.Context, member *models.ChatMembe
 func (s testStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
 	return nil, nil
 }
+func (s testStorage) GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
+	return nil, nil
+}
 func (s testStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
 func (s testStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
 	return nil, nil
 }
 func (s testStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s testStorage) UpdateMessage(ctx context.Context, msg *models.Message) error { return nil }
+func (s testStorage) DeleteMessage(ctx context.Context, id uuid.UUID) error        { return nil }
+func (s testStorage) MarkMessageAsRead(ctx context.Context, messageID, userID uuid.UUID) error {
+	return nil
+}
+func (s testStorage) GetMessageReadStatus(ctx context.Context, messageID uuid.UUID) ([]uuid.UUID, error) {
 	return nil, nil
 }
 func (s testStorage) CreateSession(ctx context.Context, session *models.Session) error { return nil }
@@ -64,7 +76,9 @@ type testEjabberd struct{ err error }
 func (e testEjabberd) Ready(context.Context) error { return e.err }
 func (e testEjabberd) Close() error                { return nil }
 func TestHealth(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour)
+	hub := websocket.NewHub()
+	go hub.Run()
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/health", nil)
 	h.ServeHTTP(rr, req)
@@ -73,7 +87,9 @@ func TestHealth(t *testing.T) {
 	}
 }
 func TestReady(t *testing.T) {
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour)
+	hub := websocket.NewHub()
+	go hub.Run()
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/ready", nil)
 	h.ServeHTTP(rr, req)

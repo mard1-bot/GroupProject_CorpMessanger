@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+
 	"time"
+
+	"github.com/google/uuid"
 
 	"corp-messenger/backend/internal/models"
 
-	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 )
 
@@ -243,17 +246,45 @@ func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) err
 	return err
 }
 
-func (s *PostgresStorage) GetUsers(ctx context.Context) ([]*models.User, error) {
+func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error) {
 	// Default limit to prevent unbounded results
-	const defaultLimit = 100
-	query := `
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+
+	// Build query dynamically based on search
+	var args []interface{}
+	argIdx := 1
+
+	whereClause := "WHERE status = 'active'"
+
+	// Exclude current user if specified
+	if excludeUserID != "" {
+		whereClause += fmt.Sprintf(" AND id != $%d", argIdx)
+		args = append(args, excludeUserID)
+		argIdx++
+	}
+
+	// Add search filter (email, first_name, last_name)
+	if search != "" {
+		searchPattern := "%" + strings.ToLower(search) + "%"
+		whereClause += fmt.Sprintf(" AND (LOWER(email) LIKE $%d OR LOWER(first_name) LIKE $%d OR LOWER(last_name) LIKE $%d)", argIdx, argIdx, argIdx)
+		args = append(args, searchPattern)
+		argIdx++
+	}
+
+	// Add limit
+	args = append(args, limit)
+
+	query := fmt.Sprintf(`
 		SELECT id, email, phone, first_name, last_name, middle_name,
 		       avatar, status, role, created_at, updated_at
-		FROM users WHERE status = 'active'
+		FROM users %s
 		ORDER BY created_at DESC
-		LIMIT $1
-	`
-	rows, err := s.db.QueryContext(ctx, query, defaultLimit)
+		LIMIT $%d
+	`, whereClause, argIdx)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -349,10 +380,31 @@ func (s *PostgresStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*model
 		}
 		return nil, err
 	}
+
+	// Load members for direct chats
+	if chat.Type == "direct" {
+		members, err := s.GetChatMembersWithUsers(ctx, chat.ID)
+		if err != nil {
+			// Log error but don't fail
+			fmt.Printf("ERROR: GetChatMembersWithUsers failed: %v\n", err)
+		} else {
+			fmt.Printf("DEBUG: Loaded %d members for chat %s\n", len(members), chat.ID)
+			for i, m := range members {
+				if m.User != nil {
+					fmt.Printf("DEBUG: Member %d: user_id=%s, name=%s %s\n", i, m.UserID, m.User.FirstName, m.User.LastName)
+				} else {
+					fmt.Printf("DEBUG: Member %d: user_id=%s, NO USER DATA\n", i, m.UserID)
+				}
+			}
+			chat.Members = members
+		}
+	}
+
 	return chat, nil
 }
 
 func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([]*models.Chat, error) {
+	// First get basic chat info
 	query := `
 		SELECT c.id, c.type, c.title, c.description, c.avatar, c.creator_id, c.created_at, c.updated_at
 		FROM chats c
@@ -378,7 +430,21 @@ func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([
 		}
 		chats = append(chats, chat)
 	}
-	return chats, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// For direct chats, get other participant info
+	for _, chat := range chats {
+		if chat.Type == "direct" {
+			members, err := s.GetChatMembersWithUsers(ctx, chat.ID)
+			if err == nil {
+				chat.Members = members
+			}
+		}
+	}
+
+	return chats, nil
 }
 
 func (s *PostgresStorage) AddChatMember(ctx context.Context, member *models.ChatMember) error {
@@ -412,6 +478,37 @@ func (s *PostgresStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) 
 		if err != nil {
 			return nil, err
 		}
+		members = append(members, m)
+	}
+	return members, rows.Err()
+}
+
+func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
+	query := `
+		SELECT cm.chat_id, cm.user_id, cm.role, cm.joined_at, cm.last_read_at,
+			u.id, u.email, u.first_name, u.last_name, u.middle_name, u.avatar, u.status, u.role, u.created_at, u.updated_at
+		FROM chat_members cm
+		JOIN users u ON cm.user_id = u.id
+		WHERE cm.chat_id = $1
+	`
+	rows, err := s.db.QueryContext(ctx, query, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []*models.ChatMember
+	for rows.Next() {
+		m := &models.ChatMember{}
+		u := &models.User{}
+		err := rows.Scan(
+			&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt,
+			&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.MiddleName, &u.Avatar, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		m.User = u
 		members = append(members, m)
 	}
 	return members, rows.Err()
@@ -487,6 +584,51 @@ func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUI
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+func (s *PostgresStorage) UpdateMessage(ctx context.Context, msg *models.Message) error {
+	query := `
+		UPDATE messages 
+		SET content = $1, updated_at = NOW() 
+		WHERE id = $2
+		RETURNING updated_at
+	`
+	return s.db.QueryRowContext(ctx, query, msg.Content, msg.ID).Scan(&msg.UpdatedAt)
+}
+
+func (s *PostgresStorage) DeleteMessage(ctx context.Context, id uuid.UUID) error {
+	query := `DELETE FROM messages WHERE id = $1`
+	_, err := s.db.ExecContext(ctx, query, id)
+	return err
+}
+
+func (s *PostgresStorage) MarkMessageAsRead(ctx context.Context, messageID, userID uuid.UUID) error {
+	query := `
+		INSERT INTO message_reads (message_id, user_id, read_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (message_id, user_id) DO NOTHING
+	`
+	_, err := s.db.ExecContext(ctx, query, messageID, userID)
+	return err
+}
+
+func (s *PostgresStorage) GetMessageReadStatus(ctx context.Context, messageID uuid.UUID) ([]uuid.UUID, error) {
+	query := `SELECT user_id FROM message_reads WHERE message_id = $1`
+	rows, err := s.db.QueryContext(ctx, query, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []uuid.UUID
+	for rows.Next() {
+		var userID uuid.UUID
+		if err := rows.Scan(&userID); err != nil {
+			return nil, err
+		}
+		users = append(users, userID)
+	}
+	return users, rows.Err()
 }
 
 func (s *PostgresStorage) CreateSession(ctx context.Context, session *models.Session) error {

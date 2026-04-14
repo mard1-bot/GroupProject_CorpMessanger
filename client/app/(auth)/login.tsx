@@ -27,6 +27,10 @@ export default function LoginScreen() {
   const primaryColor = useThemeColor({}, 'primary');
 
   const handleLogin = async () => {
+    if (!email.trim() || !password.trim()) {
+      setError('Введите email и пароль');
+      return;
+    }
     try {
       await login(email, password);
       router.replace('/(tabs)');

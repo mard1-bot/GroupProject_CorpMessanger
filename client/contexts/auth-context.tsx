@@ -25,6 +25,33 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const AUTH_TOKEN_KEY = '@auth_token';
 const USER_DATA_KEY = '@user_data';
 
+// Check if running in web environment
+const isWeb = typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
+
+// Web storage wrapper using localStorage
+const storage = {
+  getItem: async (key: string): Promise<string | null> => {
+    if (isWeb) {
+      return localStorage.getItem(key);
+    }
+    return AsyncStorage.getItem(key);
+  },
+  setItem: async (key: string, value: string): Promise<void> => {
+    if (isWeb) {
+      localStorage.setItem(key, value);
+    } else {
+      await AsyncStorage.setItem(key, value);
+    }
+  },
+  removeItem: async (key: string): Promise<void> => {
+    if (isWeb) {
+      localStorage.removeItem(key);
+    } else {
+      await AsyncStorage.removeItem(key);
+    }
+  }
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -37,8 +64,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const loadAuthState = async () => {
     try {
-      const storedToken = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
-      const storedUser = await AsyncStorage.getItem(USER_DATA_KEY);
+      console.log('Loading auth state...');
+      console.log('localStorage keys:', isWeb ? Object.keys(localStorage) : 'N/A');
+      const storedToken = await storage.getItem(AUTH_TOKEN_KEY);
+      const storedUser = await storage.getItem(USER_DATA_KEY);
+      console.log('Stored token:', storedToken ? 'found' : 'not found');
+      console.log('Stored user:', storedUser ? 'found' : 'not found');
 
       if (storedToken && storedUser) {
         let parsedUser: User;
@@ -46,14 +77,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           parsedUser = JSON.parse(storedUser);
         } catch (parseError) {
           console.error('Failed to parse stored user data:', parseError);
-          // Clear corrupted data
-          await AsyncStorage.removeItem(USER_DATA_KEY);
+          await storage.removeItem(USER_DATA_KEY);
           setIsLoading(false);
           return;
         }
         api.setToken(storedToken);
         setToken(storedToken);
         setUser(parsedUser);
+        console.log('Auth state restored successfully');
+      } else {
+        console.log('No stored auth state found');
       }
     } catch (error) {
       console.error('Failed to load auth state:', error);
@@ -64,8 +97,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const saveAuthState = async (authData: AuthResponse) => {
     try {
-      await AsyncStorage.setItem(AUTH_TOKEN_KEY, authData.token);
-      await AsyncStorage.setItem(USER_DATA_KEY, JSON.stringify(authData.user));
+      console.log('Saving auth state, token:', authData.token ? 'exists' : 'missing');
+      console.log('isWeb:', isWeb);
+      await storage.setItem(AUTH_TOKEN_KEY, authData.token);
+      await storage.setItem(USER_DATA_KEY, JSON.stringify(authData.user));
+      console.log('localStorage after save:', isWeb ? Object.keys(localStorage) : 'N/A');
       api.setToken(authData.token);
       setToken(authData.token);
       setUser(authData.user);
@@ -76,8 +112,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const clearAuthState = async () => {
     try {
-      await AsyncStorage.removeItem(AUTH_TOKEN_KEY);
-      await AsyncStorage.removeItem(USER_DATA_KEY);
+      await storage.removeItem(AUTH_TOKEN_KEY);
+      await storage.removeItem(USER_DATA_KEY);
       api.setToken(null);
       setToken(null);
       setUser(null);
@@ -88,11 +124,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = async (email: string, password: string): Promise<boolean> => {
     const response = await api.login({ email, password });
-
+    console.log('Login response:', response);
     if (response.error || !response.data) {
-      return false;
+      console.error('Login failed:', response.error);
+      throw new Error(response.error?.message || 'Login failed');
     }
-
     await saveAuthState(response.data);
     return true;
   };
@@ -126,7 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const response = await api.getCurrentUser();
     if (response.data) {
       setUser(response.data);
-      await AsyncStorage.setItem(USER_DATA_KEY, JSON.stringify(response.data));
+      await storage.setItem(USER_DATA_KEY, JSON.stringify(response.data));
     }
   };
 

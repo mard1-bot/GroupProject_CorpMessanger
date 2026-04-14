@@ -3,6 +3,7 @@ package http
 import (
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"corp-messenger/backend/internal/auth"
@@ -30,7 +31,24 @@ func isValidPhone(phone string) bool {
 }
 
 func (h *Handler) getUsers(w http.ResponseWriter, r *http.Request) {
-	users, err := h.storage.GetUsers(r.Context())
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Get query parameters
+	search := r.URL.Query().Get("search")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 20
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	// Search users, excluding current user
+	users, err := h.storage.GetUsers(r.Context(), search, claims.UserID.String(), limit)
 	if err != nil {
 		h.logger.Error("failed to get users", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get users")

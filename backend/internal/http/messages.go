@@ -4,9 +4,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -127,6 +129,24 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast message via WebSocket for realtime delivery
+	if h.hub != nil {
+		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+			Type:   websocket.EventNewMessage,
+			ChatID: chatID,
+			Payload: websocket.MessagePayload{
+				ID:        msg.ID,
+				ChatID:    msg.ChatID,
+				SenderID:  msg.SenderID,
+				Type:      msg.Type,
+				Content:   msg.Content,
+				CreatedAt: time.Now(),
+				ReplyTo:   msg.ReplyTo,
+			},
+			ExcludeSender: &claims.UserID,
+		})
+	}
+
 	WriteJSON(w, http.StatusCreated, msg)
 }
 
@@ -184,5 +204,192 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Populate read status for each message
+	for _, msg := range messages {
+		readBy, err := h.storage.GetMessageReadStatus(r.Context(), msg.ID)
+		if err == nil {
+			msg.ReadBy = readBy
+		}
+	}
+
+	// Mark messages as read for current user
+	for _, msg := range messages {
+		if msg.SenderID != claims.UserID {
+			h.storage.MarkMessageAsRead(r.Context(), msg.ID, claims.UserID)
+		}
+	}
+
+	// Broadcast read receipt
+	if h.hub != nil {
+		unreadCount := 0
+		for _, msg := range messages {
+			if msg.SenderID == claims.UserID {
+				readBy, _ := h.storage.GetMessageReadStatus(r.Context(), msg.ID)
+				if len(readBy) > 0 {
+					unreadCount++
+				}
+			}
+		}
+		if unreadCount > 0 {
+			h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+				Type:   websocket.EventReadReceipt,
+				ChatID: chatID,
+				Payload: map[string]interface{}{
+					"reader_id": claims.UserID,
+					"read_at":   time.Now(),
+				},
+			})
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, messages)
+}
+
+type EditMessageRequest struct {
+	Content string `json:"content"`
+}
+
+func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	messageIDStr := chi.URLParam(r, "msgID")
+	messageID, err := uuid.Parse(messageIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		return
+	}
+
+	var req EditMessageRequest
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	trimmedContent := strings.TrimSpace(req.Content)
+	if trimmedContent == "" {
+		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required")
+		return
+	}
+
+	// Get message
+	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
+	if err != nil {
+		h.logger.Error("failed to get message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		return
+	}
+	if msg == nil {
+		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		return
+	}
+
+	// Verify message belongs to the chat
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, _ := uuid.Parse(chatIDStr)
+	if msg.ChatID != chatID {
+		WriteError(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
+		return
+	}
+
+	// Check sender
+	if msg.SenderID != claims.UserID {
+		WriteError(w, http.StatusForbidden, "forbidden", "Can only edit own messages")
+		return
+	}
+
+	// Update message
+	msg.Content = trimmedContent
+	msg.UpdatedAt = time.Now()
+
+	if err := h.storage.UpdateMessage(r.Context(), msg); err != nil {
+		h.logger.Error("failed to update message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update message")
+		return
+	}
+
+	// Broadcast update
+	if h.hub != nil {
+		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+			Type:   websocket.EventMessageUpdated,
+			ChatID: msg.ChatID,
+			Payload: websocket.MessagePayload{
+				ID:        msg.ID,
+				ChatID:    msg.ChatID,
+				SenderID:  msg.SenderID,
+				Type:      msg.Type,
+				Content:   msg.Content,
+				CreatedAt: msg.CreatedAt,
+				UpdatedAt: &msg.UpdatedAt,
+				ReplyTo:   msg.ReplyTo,
+			},
+		})
+	}
+
+	WriteJSON(w, http.StatusOK, msg)
+}
+
+func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	messageIDStr := chi.URLParam(r, "msgID")
+	messageID, err := uuid.Parse(messageIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		return
+	}
+
+	// Get message
+	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
+	if err != nil {
+		h.logger.Error("failed to get message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		return
+	}
+	if msg == nil {
+		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		return
+	}
+
+	// Verify message belongs to the chat
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, _ := uuid.Parse(chatIDStr)
+	if msg.ChatID != chatID {
+		WriteError(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
+		return
+	}
+
+	// Check sender
+	if msg.SenderID != claims.UserID {
+		WriteError(w, http.StatusForbidden, "forbidden", "Can only delete own messages")
+		return
+	}
+
+	// Delete message
+	if err := h.storage.DeleteMessage(r.Context(), messageID); err != nil {
+		h.logger.Error("failed to delete message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete message")
+		return
+	}
+
+	// Broadcast deletion
+	if h.hub != nil {
+		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+			Type:   websocket.EventMessageDeleted,
+			ChatID: msg.ChatID,
+			Payload: map[string]string{
+				"message_id": messageID.String(),
+			},
+		})
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }

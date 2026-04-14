@@ -1,20 +1,23 @@
 import { useRouter } from 'expo-router';
 import dayjs from 'dayjs';
-import { useMemo, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useState } from 'react';
+import { FlatList, Pressable, StyleSheet, TextInput, View, ActivityIndicator } from 'react-native';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
-import { getOtherParticipant, mockChats } from '@/data/mock';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useAuth } from '@/contexts/auth-context';
+import { api } from '@/services/api';
+import type { Chat } from '@/types/chat';
 
 export default function ChatsScreen() {
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, isLoading: isAuthLoading } = useAuth();
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [loading, setLoading] = useState(true);
   const primaryColor = useThemeColor({}, 'primary');
   const textColor = useThemeColor({}, 'text');
   const surfaceColor = useThemeColor({}, 'surface');
@@ -22,24 +25,59 @@ export default function ChatsScreen() {
   const iconColor = useThemeColor({}, 'icon');
   const bgColor = useThemeColor({}, 'background');
 
-  const chatsForUser = useMemo(
-    () => mockChats.filter((c) => c.participantIds.includes(currentUser?.id ?? '')),
-    [currentUser?.id]
-  );
+  useEffect(() => {
+    if (!isAuthLoading) {
+      loadChats();
+    }
+  }, [isAuthLoading]);
+
+  const loadChats = async () => {
+    setLoading(true);
+    try {
+      const res = await api.getUserChats();
+      console.log('Chats loaded:', JSON.stringify(res.data?.[0], null, 2));
+      if (res.data) setChats(res.data);
+    } catch (error) {
+      console.error('Failed to load chats:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getOtherParticipant = (chat: Chat, userId: string) => {
+    if (chat.type !== 'direct') return null;
+    const members = chat.members || [];
+    const member = members.find(m => m.user_id !== userId);
+    return member?.user || null;
+  };
+
+  const getChatDisplayName = (chat: Chat) => {
+    if (chat.type === 'direct') {
+      const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
+      if (other) {
+        return `${other.first_name} ${other.last_name}`.trim() || other.username || 'Пользователь';
+      }
+    }
+    return chat.title || 'Чат';
+  };
 
   const filteredChats = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return chatsForUser;
-    return chatsForUser.filter((chat) => {
+    if (!q) return chats;
+    return chats.filter((chat) => {
       const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
-      return other?.username?.toLowerCase().includes(q) ?? false;
+      const name = other ? `${other.first_name} ${other.last_name}`.toLowerCase() : '';
+      return name.includes(q);
     });
-  }, [chatsForUser, currentUser, searchQuery]);
+  }, [chats, currentUser, searchQuery]);
 
   const renderItem = ({ item: chat }: { item: (typeof filteredChats)[0] }) => {
     const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
-    const time = dayjs(chat.updatedAt).format('HH:mm');
-    const initials = other?.name ? other.name.split(' ').map((n) => n[0]).join('').slice(0, 2) : '?';
+    const displayName = getChatDisplayName(chat);
+    const time = dayjs(chat.updated_at).format('HH:mm');
+    const initials = other 
+      ? `${other.first_name?.[0] || ''}${other.last_name?.[0] || ''}`.toUpperCase() || other.username?.[0]?.toUpperCase() || '?'
+      : (chat.title?.[0]?.toUpperCase() || '?');
 
     return (
       <Pressable
@@ -51,12 +89,12 @@ export default function ChatsScreen() {
         <View style={styles.content}>
           <View style={styles.rowTop}>
             <ThemedText numberOfLines={1} style={styles.name}>
-              {other?.name ?? 'Чат'}
+              {displayName}
             </ThemedText>
             <ThemedText style={styles.time}>{time}</ThemedText>
           </View>
           <ThemedText numberOfLines={1} style={styles.preview}>
-            {chat.lastMessage ?? ''}
+            {'Новое сообщение'}
           </ThemedText>
         </View>
       </Pressable>
@@ -66,9 +104,21 @@ export default function ChatsScreen() {
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: bgColor }]} edges={['top']}>
       <ThemedView style={styles.container}>
-        <ThemedText type="title" style={styles.header}>
-          Чаты
-        </ThemedText>
+        <View style={styles.headerRow}>
+          <ThemedText type="title" style={styles.header}>
+            Чаты
+          </ThemedText>
+          <Pressable
+            onPress={() => router.push('/new-chat')}
+            style={({ pressed }) => [
+              styles.newChatButton,
+              pressed && styles.newChatButtonPressed,
+              { backgroundColor: primaryColor }
+            ]}
+          >
+            <MaterialIcons name="edit" size={20} color="#fff" />
+          </Pressable>
+        </View>
         <View style={[styles.searchRow, { backgroundColor: surfaceColor, borderColor }]}>
           <MaterialIcons name="search" size={22} color={iconColor} style={styles.searchIcon} />
           <TextInput
@@ -98,7 +148,21 @@ export default function ChatsScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   container: { flex: 1 },
-  header: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12 },
+  header: { paddingTop: 16, paddingBottom: 12 },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+  },
+  newChatButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  newChatButtonPressed: { opacity: 0.8 },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',

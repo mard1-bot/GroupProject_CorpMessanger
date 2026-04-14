@@ -162,19 +162,25 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 	user, passwordHash, err := h.storage.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
-		h.logger.Error("failed to get user by email", "error", err)
+		h.logger.Error("login: failed to get user by email", "email", req.Email, "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to authenticate user")
 		return
 	}
 	if user == nil {
+		h.logger.Warn("login: user not found", "email", req.Email)
 		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}
 
+	h.logger.Info("login: user found", "email", req.Email, "user_id", user.ID, "hash_len", len(passwordHash))
+
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		h.logger.Warn("login: password mismatch", "email", req.Email, "error", err)
 		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}
+
+	h.logger.Info("login: password verified", "email", req.Email)
 
 	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {

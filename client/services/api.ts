@@ -28,7 +28,7 @@ const getBaseURL = (): string => {
 };
 
 // API URL - automatically selects the correct URL for each platform
-const API_URL = Platform.select({
+export const API_URL = Platform.select({
   ios: USE_LOCALHOST 
     ? `http://localhost:${BACKEND_PORT}` 
     : (BACKEND_URL || `http://${BACKEND_IP || 'localhost'}:${BACKEND_PORT}`),
@@ -56,6 +56,7 @@ export interface User {
   id: string;
   email: string;
   phone?: string;
+  username?: string;
   first_name: string;
   last_name: string;
   middle_name?: string;
@@ -83,6 +84,15 @@ export interface ChatMember {
   role: string;
   joined_at: string;
   last_read_at: string;
+  user?: {
+    id: string;
+    email: string;
+    name: string;
+    username: string;
+    first_name: string;
+    last_name: string;
+    avatar?: string;
+  };
 }
 
 export interface Message {
@@ -91,9 +101,11 @@ export interface Message {
   sender_id: string;
   type: string;
   content: string;
-  created_at: string;
-  updated_at: string;
+  file_url?: string;
   reply_to?: string;
+  created_at: string;
+  updated_at?: string;
+  read_by?: string[];
 }
 
 export interface AuthResponse {
@@ -130,6 +142,7 @@ class ApiClient {
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    console.log(`API ${method} ${path} - Token:`, this.token ? 'present' : 'missing');
 
     try {
       const response = await fetch(url, {
@@ -212,8 +225,12 @@ class ApiClient {
   }
 
   // Users
-  async getUsers(): Promise<ApiResponse<User[]>> {
-    return this.request('GET', '/api/v1/users');
+  async getUsers(search?: string, limit?: number): Promise<ApiResponse<User[]>> {
+    const params = new URLSearchParams();
+    if (search) params.append('search', search);
+    if (limit) params.append('limit', limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : '';
+    return this.request('GET', `/api/v1/users${query}`);
   }
 
   async getUserById(id: string): Promise<ApiResponse<User>> {
@@ -254,13 +271,23 @@ class ApiClient {
     chatId: string,
     content: string,
     type?: string,
-    replyTo?: string
   ): Promise<ApiResponse<Message>> {
-    return this.request('POST', `/api/v1/chats/${chatId}/messages`, {
-      content,
-      type,
-      reply_to: replyTo,
-    });
+    return this.request<Message>('POST', `/api/v1/chats/${chatId}/messages`, { content, type: type || 'text' });
+  }
+
+  async editMessage(
+    chatId: string,
+    messageId: string,
+    content: string,
+  ): Promise<ApiResponse<Message>> {
+    return this.request<Message>('PUT', `/api/v1/chats/${chatId}/messages/${messageId}`, { content });
+  }
+
+  async deleteMessage(
+    chatId: string,
+    messageId: string,
+  ): Promise<ApiResponse<void>> {
+    return this.request<void>('DELETE', `/api/v1/chats/${chatId}/messages/${messageId}`);
   }
 
   async getChatMessages(

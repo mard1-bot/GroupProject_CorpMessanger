@@ -10,6 +10,7 @@ import (
 	apphttp "corp-messenger/backend/internal/http"
 	"corp-messenger/backend/internal/logger"
 	"corp-messenger/backend/internal/storage"
+	"corp-messenger/backend/internal/websocket"
 )
 
 type App struct {
@@ -53,7 +54,11 @@ func New() (*App, error) {
 		return nil, fmt.Errorf("JWT_SECRET must be at least 32 characters long for security (HS256)")
 	}
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour)
+	// Create WebSocket hub
+	hub := websocket.NewHub()
+	go hub.Run()
+
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           handler,
