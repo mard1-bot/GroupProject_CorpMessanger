@@ -290,7 +290,7 @@ func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUs
 	}
 	defer rows.Close()
 
-	var users []*models.User
+	users := make([]*models.User, 0)
 	for rows.Next() {
 		user := &models.User{}
 		err := rows.Scan(

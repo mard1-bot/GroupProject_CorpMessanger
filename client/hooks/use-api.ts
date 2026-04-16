@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo } from 'react';
+import { router } from 'expo-router';
 import api, { ApiResponse, ApiError } from '@/services/api';
 
 interface UseApiState<T> {
@@ -23,6 +24,12 @@ export function useApi<T, Args extends unknown[]>(apiFunc: ApiFunction<T, Args>)
       const response = await apiFunc(...args);
 
       if (response.error) {
+        // Handle 401 unauthorized - clear auth and redirect to login
+        if (response.error.code === 'unauthorized' || response.error.code === 'invalid_token') {
+          localStorage.removeItem('@auth_token');
+          localStorage.removeItem('@user_data');
+          router.replace('/login');
+        }
         setState({
           data: null,
           loading: false,

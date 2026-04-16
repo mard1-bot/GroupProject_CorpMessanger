@@ -38,12 +38,12 @@ type Chat struct {
 }
 
 type ChatMember struct {
-	ChatID     uuid.UUID `json:"chat_id" db:"chat_id"`
-	UserID     uuid.UUID `json:"user_id" db:"user_id"`
-	Role       string    `json:"role" db:"role"`
-	JoinedAt   time.Time `json:"joined_at" db:"joined_at"`
-	LastReadAt time.Time `json:"last_read_at" db:"last_read_at"`
-	User       *User     `json:"user,omitempty" db:"-"`
+	ChatID     uuid.UUID  `json:"chat_id" db:"chat_id"`
+	UserID     uuid.UUID  `json:"user_id" db:"user_id"`
+	Role       string     `json:"role" db:"role"`
+	JoinedAt   time.Time  `json:"joined_at" db:"joined_at"`
+	LastReadAt *time.Time `json:"last_read_at,omitempty" db:"last_read_at"`
+	User       *User      `json:"user,omitempty" db:"-"`
 }
 
 type Message struct {

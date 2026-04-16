@@ -150,7 +150,7 @@ export default function ChatScreen() {
     api.getChatMessages(id, 50).then(res => {
       console.log('Messages loaded:', res.data?.length, 'First message sender:', res.data?.[0]?.sender_id);
       if (res.data) {
-        setMessages(res.data.reverse());
+        setMessages(res.data);
       }
     }).catch(err => console.error('Failed to load messages:', err));
   }, [id]);
@@ -470,7 +470,8 @@ export default function ChatScreen() {
           data={listItems}
           keyExtractor={(item) => item.key}
           renderItem={renderItem}
-          inverted={true}
+          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+          onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           contentContainerStyle={[styles.list, { paddingTop: insets.bottom + 60 }]}
         />
         <View style={[styles.inputRow, { paddingBottom: insets.bottom + 12, backgroundColor: surfaceColor }]}>
