@@ -9,6 +9,7 @@ import (
 	"corp-messenger/backend/internal/ejabberd"
 	apphttp "corp-messenger/backend/internal/http"
 	"corp-messenger/backend/internal/logger"
+	"corp-messenger/backend/internal/notifications"
 	"corp-messenger/backend/internal/storage"
 	"corp-messenger/backend/internal/websocket"
 )
@@ -43,7 +44,15 @@ func New() (*App, error) {
 		logg.Warn("using stub storage, no database connection")
 	}
 
-	ejb := ejabberd.NewStub()
+	// Initialize XMPP client (ejabberd) if configured
+	var ejb ejabberd.Client
+	if cfg.EjabberdHost != "" && cfg.EjabberdAPISecret != "" {
+		ejb = ejabberd.NewXMPPClient(cfg.EjabberdHost, cfg.EjabberdPort, cfg.EjabberdAPISecret)
+		logg.Info("initialized XMPP client", "host", cfg.EjabberdHost, "port", cfg.EjabberdPort)
+	} else {
+		ejb = ejabberd.NewStub()
+		logg.Warn("using stub XMPP client, no ejabberd configuration")
+	}
 
 	jwtSecret := cfg.JWTSecret
 	if jwtSecret == "" {
@@ -58,7 +67,15 @@ func New() (*App, error) {
 	hub := websocket.NewHub()
 	go hub.Run()
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub)
+	// Initialize notification service
+	notificationSvc, err := notifications.NewService(logg.Handler(), stg)
+	if err != nil {
+		logg.Error("failed to initialize notification service", "error", err)
+		// Continue without notifications - not critical
+		notificationSvc = nil
+	}
+
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub, notificationSvc)
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           handler,

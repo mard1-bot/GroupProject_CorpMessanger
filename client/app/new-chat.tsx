@@ -6,8 +6,10 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '@/contexts/auth-context';
 import { api } from '@/services/api';
 import { ThemedText } from '@/components/themed-text';
@@ -28,6 +30,7 @@ interface User {
 export default function NewChatScreen() {
   const router = useRouter();
   const { token } = useAuth();
+  const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<'direct' | 'group'>('direct');
   const [search, setSearch] = useState('');
   const [users, setUsers] = useState<User[]>([]);
@@ -101,9 +104,16 @@ export default function NewChatScreen() {
       
       if (response.data) {
         router.replace(`/chat/${response.data.id}`);
+      } else if (response.error) {
+        if (response.error.code === 'chat_exists') {
+          alert('Личный чат с этим пользователем уже существует');
+        } else {
+          alert('Ошибка: ' + response.error.message);
+        }
       }
     } catch (error) {
       console.error('Create chat error:', error);
+      alert('Не удалось создать чат');
     } finally {
       setCreating(false);
     }
@@ -141,9 +151,12 @@ export default function NewChatScreen() {
   }, [selectedUsers, mode, primaryColor, surfaceColor, textColor]);
 
   return (
-    <ThemedView style={styles.container}>
+    <ThemedView style={[styles.container, { 
+      paddingTop: Platform.OS === 'ios' ? insets.top : insets.top + 10,
+      paddingBottom: insets.bottom 
+    }]}>
       {/* Mode Toggle */}
-      <View style={[styles.modeToggle, { backgroundColor: surfaceColor, borderColor }]}>
+      <View style={[styles.modeToggle, { backgroundColor: surfaceColor, borderColor, marginTop: 8 }]}>
         <TouchableOpacity
           onPress={() => { setMode('direct'); setSelectedUsers([]); }}
           style={[styles.modeButton, mode === 'direct' && { backgroundColor: primaryColor }]}>

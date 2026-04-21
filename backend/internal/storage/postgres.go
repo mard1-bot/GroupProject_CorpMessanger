@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"time"
@@ -84,6 +85,8 @@ CREATE TABLE IF NOT EXISTS chat_members (
     role VARCHAR(20) DEFAULT 'member',
     joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_read_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    muted BOOLEAN DEFAULT FALSE,
+    pinned BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -259,6 +262,8 @@ func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUs
 	whereClause := "WHERE status = 'active'"
 
 	// Exclude current user if specified
+	// SECURITY: Column name 'id' is hardcoded, only parameter index is dynamic ($%d)
+	// This is safe from SQL injection as column names are not user-controlled
 	if excludeUserID != "" {
 		whereClause += fmt.Sprintf(" AND id != $%d", argIdx)
 		args = append(args, excludeUserID)
@@ -317,7 +322,37 @@ func (s *PostgresStorage) CreateChat(ctx context.Context, chat *models.Chat) err
 	).Scan(&chat.ID, &chat.CreatedAt, &chat.UpdatedAt)
 }
 
+func (s *PostgresStorage) findExistingDirectChat(ctx context.Context, userID1, userID2 uuid.UUID) (uuid.UUID, error) {
+	query := `
+		SELECT c.id FROM chats c
+		JOIN chat_members cm1 ON c.id = cm1.chat_id AND cm1.user_id = $1
+		JOIN chat_members cm2 ON c.id = cm2.chat_id AND cm2.user_id = $2
+		WHERE c.type = 'direct'
+		LIMIT 1
+	`
+	var chatID uuid.UUID
+	err := s.db.QueryRowContext(ctx, query, userID1, userID2).Scan(&chatID)
+	if err == sql.ErrNoRows {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return chatID, nil
+}
+
 func (s *PostgresStorage) CreateChatWithMembers(ctx context.Context, chat *models.Chat, members []*models.ChatMember) error {
+	// For direct chats, check if one already exists between these users
+	if chat.Type == models.ChatTypeDirect && len(members) == 2 {
+		existingChatID, err := s.findExistingDirectChat(ctx, members[0].UserID, members[1].UserID)
+		if err != nil {
+			return fmt.Errorf("check existing direct chat: %w", err)
+		}
+		if existingChatID != uuid.Nil {
+			return fmt.Errorf("direct chat already exists")
+		}
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -388,14 +423,6 @@ func (s *PostgresStorage) GetChatByID(ctx context.Context, id uuid.UUID) (*model
 			// Log error but don't fail
 			fmt.Printf("ERROR: GetChatMembersWithUsers failed: %v\n", err)
 		} else {
-			fmt.Printf("DEBUG: Loaded %d members for chat %s\n", len(members), chat.ID)
-			for i, m := range members {
-				if m.User != nil {
-					fmt.Printf("DEBUG: Member %d: user_id=%s, name=%s %s\n", i, m.UserID, m.User.FirstName, m.User.LastName)
-				} else {
-					fmt.Printf("DEBUG: Member %d: user_id=%s, NO USER DATA\n", i, m.UserID)
-				}
-			}
 			chat.Members = members
 		}
 	}
@@ -448,21 +475,25 @@ func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([
 }
 
 func (s *PostgresStorage) AddChatMember(ctx context.Context, member *models.ChatMember) error {
-	// Add member and update chat's updated_at timestamp
+	// Add member
 	query := `
 		INSERT INTO chat_members (chat_id, user_id, role)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (chat_id, user_id) DO UPDATE SET role = $3;
-		
-		UPDATE chats SET updated_at = NOW() WHERE id = $1;
+		ON CONFLICT (chat_id, user_id) DO UPDATE SET role = $3
 	`
 	_, err := s.db.ExecContext(ctx, query, member.ChatID, member.UserID, member.Role)
+	if err != nil {
+		return err
+	}
+
+	// Update chat's updated_at timestamp
+	_, err = s.db.ExecContext(ctx, `UPDATE chats SET updated_at = NOW() WHERE id = $1`, member.ChatID)
 	return err
 }
 
 func (s *PostgresStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
 	query := `
-		SELECT chat_id, user_id, role, joined_at, last_read_at
+		SELECT chat_id, user_id, role, joined_at, last_read_at, muted, pinned
 		FROM chat_members WHERE chat_id = $1
 	`
 	rows, err := s.db.QueryContext(ctx, query, chatID)
@@ -474,7 +505,7 @@ func (s *PostgresStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) 
 	var members []*models.ChatMember
 	for rows.Next() {
 		m := &models.ChatMember{}
-		err := rows.Scan(&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt)
+		err := rows.Scan(&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt, &m.Muted, &m.Pinned)
 		if err != nil {
 			return nil, err
 		}
@@ -485,7 +516,7 @@ func (s *PostgresStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) 
 
 func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
 	query := `
-		SELECT cm.chat_id, cm.user_id, cm.role, cm.joined_at, cm.last_read_at,
+		SELECT cm.chat_id, cm.user_id, cm.role, cm.joined_at, cm.last_read_at, cm.muted, cm.pinned,
 			u.id, u.email, u.first_name, u.last_name, u.middle_name, u.avatar, u.status, u.role, u.created_at, u.updated_at
 		FROM chat_members cm
 		JOIN users u ON cm.user_id = u.id
@@ -502,7 +533,7 @@ func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uu
 		m := &models.ChatMember{}
 		u := &models.User{}
 		err := rows.Scan(
-			&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt,
+			&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt, &m.Muted, &m.Pinned,
 			&u.ID, &u.Email, &u.FirstName, &u.LastName, &u.MiddleName, &u.Avatar, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt,
 		)
 		if err != nil {
@@ -514,28 +545,109 @@ func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uu
 	return members, rows.Err()
 }
 
+func (s *PostgresStorage) MuteChat(ctx context.Context, chatID, userID uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_members SET muted = true WHERE chat_id = $1 AND user_id = $2`,
+		chatID, userID)
+	return err
+}
+
+func (s *PostgresStorage) UnmuteChat(ctx context.Context, chatID, userID uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_members SET muted = false WHERE chat_id = $1 AND user_id = $2`,
+		chatID, userID)
+	return err
+}
+
+func (s *PostgresStorage) PinChat(ctx context.Context, chatID, userID uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_members SET pinned = true WHERE chat_id = $1 AND user_id = $2`,
+		chatID, userID)
+	return err
+}
+
+func (s *PostgresStorage) UnpinChat(ctx context.Context, chatID, userID uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_members SET pinned = false WHERE chat_id = $1 AND user_id = $2`,
+		chatID, userID)
+	return err
+}
+
+func (s *PostgresStorage) RemoveChatMember(ctx context.Context, chatID, userID uuid.UUID) (bool, error) {
+	// Remove member and check if any members left
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+				err = fmt.Errorf("original: %w; rollback: %v", err, rbErr)
+			}
+		}
+	}()
+
+	// Delete the member
+	deleteQuery := `DELETE FROM chat_members WHERE chat_id = $1 AND user_id = $2`
+	_, err = tx.ExecContext(ctx, deleteQuery, chatID, userID)
+	if err != nil {
+		return false, fmt.Errorf("delete member: %w", err)
+	}
+
+	// Check remaining member count
+	var count int
+	countQuery := `SELECT COUNT(*) FROM chat_members WHERE chat_id = $1`
+	err = tx.QueryRowContext(ctx, countQuery, chatID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("count members: %w", err)
+	}
+
+	// If no members left, delete the chat
+	if count == 0 {
+		_, err = tx.ExecContext(ctx, `DELETE FROM chats WHERE id = $1`, chatID)
+		if err != nil {
+			return false, fmt.Errorf("delete chat: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+
+	return count == 0, nil
+}
+
+func (s *PostgresStorage) DeleteChat(ctx context.Context, chatID uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chats WHERE id = $1`, chatID)
+	return err
+}
+
 func (s *PostgresStorage) CreateMessage(ctx context.Context, msg *models.Message) error {
 	query := `
-		INSERT INTO messages (chat_id, sender_id, type, content, reply_to)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO messages (chat_id, sender_id, type, content, file_url, reply_to)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id, created_at, updated_at
 	`
 	return s.db.QueryRowContext(ctx, query,
-		msg.ChatID, msg.SenderID, msg.Type, msg.Content, msg.ReplyTo,
+		msg.ChatID, msg.SenderID, msg.Type, msg.Content, msg.FileURL, msg.ReplyTo,
 	).Scan(&msg.ID, &msg.CreatedAt, &msg.UpdatedAt)
 }
 
 func (s *PostgresStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*models.Message, error) {
 	msg := &models.Message{}
 	query := `
-		SELECT id, chat_id, sender_id, type, content, created_at, updated_at, reply_to
+		SELECT id, chat_id, sender_id, type, content, file_url, created_at, updated_at, reply_to
 		FROM messages WHERE id = $1
 	`
 	var replyTo sql.NullString
+	var fileURL sql.NullString
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&msg.ID, &msg.ChatID, &msg.SenderID, &msg.Type, &msg.Content,
+		&msg.ID, &msg.ChatID, &msg.SenderID, &msg.Type, &msg.Content, &fileURL,
 		&msg.CreatedAt, &msg.UpdatedAt, &replyTo,
 	)
+	if fileURL.Valid {
+		msg.FileURL = &fileURL.String
+	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -553,12 +665,13 @@ func (s *PostgresStorage) GetMessageByID(ctx context.Context, id uuid.UUID) (*mo
 
 func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	query := `
-		SELECT id, chat_id, sender_id, type, content, created_at, updated_at, reply_to
+		SELECT id, chat_id, sender_id, type, content, file_url, created_at, updated_at, reply_to
 		FROM messages
 		WHERE chat_id = $1
 		ORDER BY created_at ASC
 		LIMIT $2 OFFSET $3
 	`
+	log.Printf("[DB] GetMessagesByChat: chatID=%s, limit=%d, offset=%d", chatID, limit, offset)
 	rows, err := s.db.QueryContext(ctx, query, chatID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -569,10 +682,14 @@ func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUI
 	for rows.Next() {
 		m := &models.Message{}
 		var replyTo sql.NullString
-		err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Type, &m.Content,
+		var fileURL sql.NullString
+		err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Type, &m.Content, &fileURL,
 			&m.CreatedAt, &m.UpdatedAt, &replyTo)
 		if err != nil {
 			return nil, err
+		}
+		if fileURL.Valid {
+			m.FileURL = &fileURL.String
 		}
 		if replyTo.Valid {
 			id, err := uuid.Parse(replyTo.String)
@@ -580,6 +697,53 @@ func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUI
 				m.ReplyTo = &id
 			}
 			// If parse fails, ReplyTo remains nil (invalid UUID in DB)
+		}
+		messages = append(messages, m)
+	}
+	return messages, rows.Err()
+}
+
+func (s *PostgresStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+	// Validate and sanitize query
+	if len(query) > 200 {
+		query = query[:200]
+	}
+	// Escape special ILIKE characters to prevent pattern abuse
+	query = strings.ReplaceAll(query, "%", "\\%")
+	query = strings.ReplaceAll(query, "_", "\\_")
+
+	sqlQuery := `
+		SELECT id, chat_id, sender_id, type, content, file_url, created_at, updated_at, reply_to
+		FROM messages
+		WHERE chat_id = $1 AND content ILIKE $2
+		ORDER BY created_at DESC
+		LIMIT $3 OFFSET $4
+	`
+	searchPattern := "%" + query + "%"
+	rows, err := s.db.QueryContext(ctx, sqlQuery, chatID, searchPattern, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*models.Message
+	for rows.Next() {
+		m := &models.Message{}
+		var replyTo sql.NullString
+		var fileURL sql.NullString
+		err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Type, &m.Content, &fileURL,
+			&m.CreatedAt, &m.UpdatedAt, &replyTo)
+		if err != nil {
+			return nil, err
+		}
+		if fileURL.Valid {
+			m.FileURL = &fileURL.String
+		}
+		if replyTo.Valid {
+			id, err := uuid.Parse(replyTo.String)
+			if err == nil {
+				m.ReplyTo = &id
+			}
 		}
 		messages = append(messages, m)
 	}
@@ -594,6 +758,16 @@ func (s *PostgresStorage) UpdateMessage(ctx context.Context, msg *models.Message
 		RETURNING updated_at
 	`
 	return s.db.QueryRowContext(ctx, query, msg.Content, msg.ID).Scan(&msg.UpdatedAt)
+}
+
+func (s *PostgresStorage) UpdateMessageFileURL(ctx context.Context, messageID uuid.UUID, fileURL string) error {
+	query := `
+		UPDATE messages 
+		SET file_url = $1, updated_at = NOW() 
+		WHERE id = $2
+	`
+	_, err := s.db.ExecContext(ctx, query, fileURL, messageID)
+	return err
 }
 
 func (s *PostgresStorage) DeleteMessage(ctx context.Context, id uuid.UUID) error {
@@ -678,5 +852,202 @@ func (s *PostgresStorage) DeleteOldSessionsForUser(ctx context.Context, userID u
 		)
 	`
 	_, err := s.db.ExecContext(ctx, query, userID, keep)
+	return err
+}
+
+func (s *PostgresStorage) CreateFile(ctx context.Context, file *models.File) error {
+	query := `
+		INSERT INTO files (id, message_id, name, size, mime_type, url, uploaded_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+	_, err := s.db.ExecContext(ctx, query,
+		file.ID, file.MessageID, file.Name, file.Size, file.MimeType, file.URL, file.UploadedAt,
+	)
+	return err
+}
+
+func (s *PostgresStorage) GetFileByID(ctx context.Context, id uuid.UUID) (*models.File, error) {
+	file := &models.File{}
+	query := `
+		SELECT id, message_id, name, size, mime_type, url, uploaded_at
+		FROM files
+		WHERE id = $1
+	`
+	err := s.db.QueryRowContext(ctx, query, id).Scan(
+		&file.ID, &file.MessageID, &file.Name, &file.Size, &file.MimeType, &file.URL, &file.UploadedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
+}
+
+func (s *PostgresStorage) GetFilesByMessage(ctx context.Context, messageID uuid.UUID) ([]*models.File, error) {
+	query := `
+		SELECT id, message_id, name, size, mime_type, url, uploaded_at
+		FROM files
+		WHERE message_id = $1
+		ORDER BY uploaded_at ASC
+	`
+	rows, err := s.db.QueryContext(ctx, query, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []*models.File
+	for rows.Next() {
+		file := &models.File{}
+		if err := rows.Scan(&file.ID, &file.MessageID, &file.Name, &file.Size, &file.MimeType, &file.URL, &file.UploadedAt); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, rows.Err()
+}
+
+// NotificationStorage implementation
+
+func (s *PostgresStorage) CreateDeviceToken(ctx context.Context, token *models.DeviceToken) error {
+	query := `
+		INSERT INTO device_tokens (id, user_id, token, platform, device_name, created_at, last_used_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $6)
+		ON CONFLICT (user_id, token) DO UPDATE SET last_used_at = EXCLUDED.last_used_at
+		RETURNING id, created_at, last_used_at
+	`
+	return s.db.QueryRowContext(ctx, query,
+		token.ID, token.UserID, token.Token, token.Platform, token.DeviceName, token.CreatedAt,
+	).Scan(&token.ID, &token.CreatedAt, &token.LastUsedAt)
+}
+
+func (s *PostgresStorage) GetDeviceTokens(ctx context.Context, userID uuid.UUID) ([]*models.DeviceToken, error) {
+	query := `
+		SELECT id, user_id, token, platform, device_name, created_at, last_used_at
+		FROM device_tokens
+		WHERE user_id = $1
+		ORDER BY last_used_at DESC
+	`
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tokens []*models.DeviceToken
+	for rows.Next() {
+		t := &models.DeviceToken{}
+		if err := rows.Scan(&t.ID, &t.UserID, &t.Token, &t.Platform, &t.DeviceName, &t.CreatedAt, &t.LastUsedAt); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, t)
+	}
+	return tokens, rows.Err()
+}
+
+func (s *PostgresStorage) DeleteDeviceToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM device_tokens WHERE token = $1`, token)
+	return err
+}
+
+func (s *PostgresStorage) GetNotificationSettings(ctx context.Context, userID uuid.UUID) (*models.NotificationSettings, error) {
+	settings := &models.NotificationSettings{UserID: userID}
+	query := `
+		SELECT push_enabled, email_enabled, email, quiet_hours_start, quiet_hours_end, quiet_hours_enabled, updated_at
+		FROM notification_settings
+		WHERE user_id = $1
+	`
+	var quietStart, quietEnd *string
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(
+		&settings.PushEnabled, &settings.EmailEnabled, &settings.Email,
+		&quietStart, &quietEnd, &settings.QuietHoursEnabled, &settings.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Return default settings
+			return &models.NotificationSettings{
+				UserID:       userID,
+				PushEnabled:  true,
+				EmailEnabled: true,
+			}, nil
+		}
+		return nil, err
+	}
+	settings.QuietHoursStart = quietStart
+	settings.QuietHoursEnd = quietEnd
+	return settings, nil
+}
+
+func (s *PostgresStorage) UpdateNotificationSettings(ctx context.Context, settings *models.NotificationSettings) error {
+	query := `
+		INSERT INTO notification_settings (user_id, push_enabled, email_enabled, email, quiet_hours_start, quiet_hours_end, quiet_hours_enabled, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (user_id) DO UPDATE SET
+			push_enabled = EXCLUDED.push_enabled,
+			email_enabled = EXCLUDED.email_enabled,
+			email = EXCLUDED.email,
+			quiet_hours_start = EXCLUDED.quiet_hours_start,
+			quiet_hours_end = EXCLUDED.quiet_hours_end,
+			quiet_hours_enabled = EXCLUDED.quiet_hours_enabled,
+			updated_at = EXCLUDED.updated_at
+		RETURNING updated_at
+	`
+	return s.db.QueryRowContext(ctx, query,
+		settings.UserID, settings.PushEnabled, settings.EmailEnabled, settings.Email,
+		settings.QuietHoursStart, settings.QuietHoursEnd, settings.QuietHoursEnabled,
+	).Scan(&settings.UpdatedAt)
+}
+
+func (s *PostgresStorage) GetChatMember(ctx context.Context, chatID, userID uuid.UUID) (*models.ChatMember, error) {
+	query := `
+		SELECT chat_id, user_id, role, joined_at, last_read_at, muted, pinned
+		FROM chat_members
+		WHERE chat_id = $1 AND user_id = $2
+	`
+	m := &models.ChatMember{}
+	var lastRead *time.Time
+	err := s.db.QueryRowContext(ctx, query, chatID, userID).Scan(
+		&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &lastRead, &m.Muted, &m.Pinned,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	m.LastReadAt = lastRead
+	return m, nil
+}
+
+func (s *PostgresStorage) GetTotalUnreadCount(ctx context.Context, userID uuid.UUID) (int, error) {
+	query := `
+		SELECT COALESCE(SUM(count), 0)
+		FROM unread_counts
+		WHERE user_id = $1
+	`
+	var count int
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&count)
+	return count, err
+}
+
+func (s *PostgresStorage) GetUserLastOnline(ctx context.Context, userID uuid.UUID) (time.Time, error) {
+	// Use last session activity or WebSocket connection
+	query := `
+		SELECT COALESCE(MAX(last_used_at), '1970-01-01'::timestamp)
+		FROM device_tokens
+		WHERE user_id = $1
+	`
+	var lastOnline time.Time
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&lastOnline)
+	return lastOnline, err
+}
+
+func (s *PostgresStorage) UpdateUserLastOnline(ctx context.Context, userID uuid.UUID) error {
+	// Update device token timestamp
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE device_tokens SET last_used_at = NOW() WHERE user_id = $1
+	`, userID)
 	return err
 }

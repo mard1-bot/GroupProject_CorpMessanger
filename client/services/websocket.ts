@@ -11,6 +11,15 @@ export const WS_EVENTS = {
   USER_JOINED: 'user_joined',
   USER_LEFT: 'user_left',
   ERROR: 'error',
+  // WebRTC call events
+  CALL_OFFER: 'call_offer',
+  CALL_ANSWER: 'call_answer',
+  CALL_ICE: 'call_ice',
+  CALL_END: 'call_end',
+  CALL_REJECT: 'call_reject',
+  CALL_ACCEPT: 'call_accept',
+  CALL_BUSY: 'call_busy',
+  CALL_RINGING: 'call_ringing',
 } as const;
 
 export type WebSocketEvent = (typeof WS_EVENTS)[keyof typeof WS_EVENTS];
@@ -29,6 +38,9 @@ export interface WSMessagePayload {
 export interface WSTypingPayload {
   chat_id: string;
   user_id: string;
+  first_name?: string;
+  last_name?: string;
+  is_typing: boolean;
 }
 
 export interface WSReadReceiptPayload {
@@ -96,9 +108,11 @@ class WebSocketService {
 
     this.isConnecting = true;
 
+    let wsCreated = false;
     try {
       const wsUrl = this.getWSUrl();
       this.ws = new WebSocket(wsUrl);
+      wsCreated = true;
 
       this.ws.onopen = () => {
         this.isConnecting = false;
@@ -138,9 +152,14 @@ class WebSocketService {
         console.error('[WebSocket] Error:', error);
       };
     } catch (err) {
-      this.isConnecting = false;
       console.error('[WebSocket] Connection failed:', err);
       this.scheduleReconnect();
+    } finally {
+      // Always reset isConnecting if WebSocket wasn't created
+      // or if an error occurred during setup
+      if (!wsCreated) {
+        this.isConnecting = false;
+      }
     }
   }
 
@@ -175,8 +194,13 @@ class WebSocketService {
   }
 
   // Send typing indicator
-  sendTyping(chatId: string): void {
-    this.send('typing', { chat_id: chatId });
+  sendTyping(chatId: string, isTyping: boolean, firstName?: string, lastName?: string): void {
+    this.send('typing', {
+      chat_id: chatId,
+      is_typing: isTyping,
+      first_name: firstName,
+      last_name: lastName,
+    });
   }
 
   // Send read receipt

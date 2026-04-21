@@ -19,6 +19,9 @@ export type Chat = {
   updated_at: string;
   members?: {
     user_id: string;
+    role?: string;
+    muted?: boolean;
+    pinned?: boolean;
     user?: {
       id: string;
       email: string;
@@ -37,6 +40,7 @@ export type Message = {
   sender_id: string;
   type: string;
   content: string;
+  file_url?: string;
   created_at: string;
   updated_at?: string;
   read_by?: string[];

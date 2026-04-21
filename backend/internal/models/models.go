@@ -43,6 +43,8 @@ type ChatMember struct {
 	Role       string     `json:"role" db:"role"`
 	JoinedAt   time.Time  `json:"joined_at" db:"joined_at"`
 	LastReadAt *time.Time `json:"last_read_at,omitempty" db:"last_read_at"`
+	Muted      bool       `json:"muted" db:"muted"`
+	Pinned     bool       `json:"pinned" db:"pinned"`
 	User       *User      `json:"user,omitempty" db:"-"`
 }
 
@@ -52,6 +54,7 @@ type Message struct {
 	SenderID  uuid.UUID   `json:"sender_id" db:"sender_id"`
 	Type      string      `json:"type" db:"type"`
 	Content   string      `json:"content" db:"content"`
+	FileURL   *string     `json:"file_url,omitempty" db:"file_url"`
 	CreatedAt time.Time   `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time   `json:"updated_at" db:"updated_at"`
 	ReplyTo   *uuid.UUID  `json:"reply_to,omitempty" db:"reply_to"`
@@ -76,6 +79,34 @@ type Session struct {
 	IP         string    `json:"ip,omitempty" db:"ip"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 	ExpiresAt  time.Time `json:"expires_at" db:"expires_at"`
+}
+
+type DeviceToken struct {
+	ID         uuid.UUID `json:"id" db:"id"`
+	UserID     uuid.UUID `json:"user_id" db:"user_id"`
+	Token      string    `json:"token" db:"token"`
+	Platform   string    `json:"platform" db:"platform"`
+	DeviceName string    `json:"device_name,omitempty" db:"device_name"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at" db:"last_used_at"`
+}
+
+type NotificationSettings struct {
+	UserID            uuid.UUID `json:"user_id" db:"user_id"`
+	PushEnabled       bool      `json:"push_enabled" db:"push_enabled"`
+	EmailEnabled      bool      `json:"email_enabled" db:"email_enabled"`
+	Email             string    `json:"email,omitempty" db:"email"`
+	QuietHoursStart   *string   `json:"quiet_hours_start,omitempty" db:"quiet_hours_start"`
+	QuietHoursEnd     *string   `json:"quiet_hours_end,omitempty" db:"quiet_hours_end"`
+	QuietHoursEnabled bool      `json:"quiet_hours_enabled" db:"quiet_hours_enabled"`
+	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
+}
+
+type UnreadCount struct {
+	UserID    uuid.UUID `json:"user_id" db:"user_id"`
+	ChatID    uuid.UUID `json:"chat_id" db:"chat_id"`
+	Count     int       `json:"count" db:"count"`
+	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }
 
 const (

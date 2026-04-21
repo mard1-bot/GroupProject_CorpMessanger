@@ -1,10 +1,20 @@
 package websocket
 
 import (
+	"log"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+// TypingState tracks who's typing in a chat
+type TypingState struct {
+	UserID    uuid.UUID `json:"user_id"`
+	FirstName string    `json:"first_name,omitempty"`
+	LastName  string    `json:"last_name,omitempty"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
 
 // Hub maintains the set of active clients and broadcasts messages to the clients.
 type Hub struct {
@@ -25,6 +35,12 @@ type Hub struct {
 
 	// UserID to client mapping for presence
 	userClients map[uuid.UUID]*Client
+
+	// Typing state per chat (chatID -> map[userID]TypingState)
+	typingState map[uuid.UUID]map[uuid.UUID]*TypingState
+
+	// WebRTC call manager
+	callManager *CallManager
 
 	mu sync.RWMutex
 }
@@ -47,6 +63,8 @@ func NewHub() *Hub {
 		clients:     make(map[*Client]bool),
 		rooms:       make(map[uuid.UUID]map[*Client]bool),
 		userClients: make(map[uuid.UUID]*Client),
+		typingState: make(map[uuid.UUID]map[uuid.UUID]*TypingState),
+		callManager: NewCallManager(),
 	}
 }
 
@@ -86,6 +104,7 @@ func (h *Hub) Run() {
 				continue
 			}
 
+			clientCount := 0
 			for client := range room {
 				// Skip excluded sender
 				if message.ExcludeSender != nil && client.UserID == *message.ExcludeSender {
@@ -94,16 +113,23 @@ func (h *Hub) Run() {
 
 				select {
 				case client.send <- message:
+					clientCount++
 				default:
-					// Client's send buffer is full, close it
+					// Client's send buffer is full, mark for removal
+					// Don't close channel here - let unregister handle it
 					h.mu.Lock()
 					delete(h.clients, client)
 					delete(room, client)
 					h.mu.Unlock()
-					// Close channel outside the lock to prevent race condition
-					close(client.send)
+					// Signal client to close itself
+					select {
+					case client.send <- nil:
+					default:
+						// Client buffer still full, just let it be
+					}
 				}
 			}
+			log.Printf("[Hub] Broadcast %s to %d clients in chat %s", message.Type, clientCount, message.ChatID)
 		}
 	}
 }
@@ -158,7 +184,93 @@ func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
 func (h *Hub) BroadcastToChat(msg *BroadcastMessage) {
 	select {
 	case h.broadcast <- msg:
+		log.Printf("[Hub] Broadcasting %s to chat %s", msg.Type, msg.ChatID)
 	default:
 		// Broadcast channel full, drop message (shouldn't happen with buffer)
+		log.Printf("[Hub] Broadcast channel full, dropping %s to chat %s", msg.Type, msg.ChatID)
+	}
+}
+
+// SetTyping updates typing state for a user in a chat
+func (h *Hub) SetTyping(chatID, userID uuid.UUID, firstName, lastName string, isTyping bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.typingState[chatID] == nil {
+		h.typingState[chatID] = make(map[uuid.UUID]*TypingState)
+	}
+
+	if isTyping {
+		h.typingState[chatID][userID] = &TypingState{
+			UserID:    userID,
+			FirstName: firstName,
+			LastName:  lastName,
+			ExpiresAt: time.Now().Add(5 * time.Second),
+		}
+	} else {
+		delete(h.typingState[chatID], userID)
+		if len(h.typingState[chatID]) == 0 {
+			delete(h.typingState, chatID)
+		}
+	}
+
+	// Broadcast typing update to room
+	go h.BroadcastToChat(&BroadcastMessage{
+		Type:   "typing",
+		ChatID: chatID,
+		Payload: map[string]interface{}{
+			"user_id":    userID,
+			"first_name": firstName,
+			"last_name":  lastName,
+			"is_typing":  isTyping,
+		},
+		ExcludeSender: &userID,
+	})
+}
+
+// GetTypingUsers returns list of users currently typing in a chat
+func (h *Hub) GetTypingUsers(chatID uuid.UUID) []TypingState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if h.typingState[chatID] == nil {
+		return nil
+	}
+
+	now := time.Now()
+	var users []TypingState
+	for _, state := range h.typingState[chatID] {
+		if state.ExpiresAt.After(now) {
+			users = append(users, *state)
+		}
+	}
+	return users
+}
+
+// CleanupExpiredTyping removes expired typing entries (call periodically)
+func (h *Hub) CleanupExpiredTyping() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := time.Now()
+	for chatID, users := range h.typingState {
+		for userID, state := range users {
+			if state.ExpiresAt.Before(now) {
+				delete(users, userID)
+			}
+		}
+		if len(users) == 0 {
+			delete(h.typingState, chatID)
+		}
+	}
+}
+
+// sendToClient sends a message directly to a specific client
+func (h *Hub) sendToClient(client *Client, msg *BroadcastMessage) {
+	select {
+	case client.send <- msg:
+		log.Printf("[Hub] Sent %s to client %s", msg.Type, client.UserID)
+	default:
+		log.Printf("[Hub] Failed to send %s to client %s (channel full)", msg.Type, client.UserID)
 	}
 }

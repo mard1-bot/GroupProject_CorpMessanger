@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
 	stdhttp "net/http"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/ejabberd"
+	"corp-messenger/backend/internal/notifications"
 	"corp-messenger/backend/internal/storage"
 	"corp-messenger/backend/internal/websocket"
 
@@ -26,6 +28,7 @@ type Handler struct {
 	corsOrigins     map[string]bool
 	sessionDuration time.Duration
 	hub             *websocket.Hub
+	notificationSvc *notifications.Service
 }
 
 // Rate limiting
@@ -117,7 +120,7 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service) stdhttp.Handler {
 	// Build CORS origins map (lowercase for case-insensitive comparison)
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
@@ -132,6 +135,9 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		}
 	}
 
+	// Set allowed origins for WebSocket origin validation
+	websocket.AllowedOrigins = originsMap
+
 	h := &Handler{
 		logger:          logger,
 		storage:         storage,
@@ -140,6 +146,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		corsOrigins:     originsMap,
 		sessionDuration: sessionDuration,
 		hub:             hub,
+		notificationSvc: notificationSvc,
 	}
 
 	r := chi.NewRouter()
@@ -175,14 +182,32 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Post("/chats", h.createChat)
 			r.Get("/chats", h.getUserChats)
 			r.Get("/chats/{id}", h.getChatByID)
+			r.Delete("/chats/{id}", h.deleteChat)
 			r.Post("/chats/{id}/members", h.addChatMember)
+			r.Delete("/chats/{id}/members/{userID}", h.removeChatMember)
+			r.Post("/chats/{id}/mute", h.muteChat)
+			r.Post("/chats/{id}/unmute", h.unmuteChat)
+			r.Post("/chats/{id}/pin", h.pinChat)
+			r.Post("/chats/{id}/unpin", h.unpinChat)
 
 			r.Post("/chats/{id}/messages", h.sendMessage)
 			r.Get("/chats/{id}/messages", h.getChatMessages)
+			r.Get("/chats/{id}/messages/search", h.searchMessages)
 			r.Put("/chats/{id}/messages/{msgID}", h.editMessage)
 			r.Delete("/chats/{id}/messages/{msgID}", h.deleteMessage)
+			r.Post("/chats/{id}/messages/{msgID}/files", h.uploadFile)
+
+			// Notifications
+			r.Post("/devices/register", h.registerDevice)
+			r.Get("/notifications/settings", h.getNotificationSettings)
+			r.Put("/notifications/settings", h.updateNotificationSettings)
+			r.Get("/notifications/unread", h.getUnreadCount)
 		})
 	})
+
+	// Static file server for uploads
+	fileServer := http.FileServer(http.Dir("./uploads"))
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", fileServer))
 
 	r.NotFound(h.notFound)
 
@@ -206,7 +231,7 @@ func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
 			w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours cache for preflight
 		}
 		// For requests without origin or unknown origins, no CORS headers are set

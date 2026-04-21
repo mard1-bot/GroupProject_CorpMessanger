@@ -131,6 +131,10 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 	// Atomic creation: chat + members in one transaction
 	if err := h.storage.CreateChatWithMembers(r.Context(), chat, membersList); err != nil {
 		h.logger.Error("failed to create chat with members", "error", err)
+		if err.Error() == "direct chat already exists" {
+			WriteError(w, http.StatusConflict, "chat_exists", "Direct chat with this user already exists")
+			return
+		}
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create chat")
 		return
 	}
@@ -206,6 +210,73 @@ func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, ChatResponse{Chat: chat, Members: members})
+}
+
+func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Get chat to check type
+	chat, err := h.storage.GetChatByID(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat")
+		return
+	}
+	if chat == nil {
+		WriteError(w, http.StatusNotFound, "not_found", "Chat not found")
+		return
+	}
+
+	// Get chat members to verify membership
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	// Check if caller is a member and get their role
+	var isMember bool
+	var callerRole string
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			callerRole = m.Role
+			break
+		}
+	}
+
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	// For group chats: only owner can delete
+	// For direct chats: any member can delete
+	if chat.Type == models.ChatTypeGroup && callerRole != models.ChatRoleOwner {
+		WriteError(w, http.StatusForbidden, "forbidden", "Only chat owner can delete group chat")
+		return
+	}
+
+	// Delete the chat
+	if err := h.storage.DeleteChat(r.Context(), chatID); err != nil {
+		h.logger.Error("failed to delete chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete chat")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
@@ -296,9 +367,25 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if user is already a member
-	if isChatMember(members, userID) {
-		WriteError(w, http.StatusConflict, "already_member", "User is already a member of this chat")
-		return
+	existingMember := getChatMember(members, userID)
+	if existingMember != nil {
+		// User exists - check if we're changing their role
+		if existingMember.Role == req.Role {
+			WriteError(w, http.StatusConflict, "already_member", "User is already a member with this role")
+			return
+		}
+
+		// Only owner can change roles
+		if callerRole != models.ChatRoleOwner {
+			WriteError(w, http.StatusForbidden, "forbidden", "Only chat owner can change member roles")
+			return
+		}
+
+		// Cannot change owner's role
+		if existingMember.Role == models.ChatRoleOwner {
+			WriteError(w, http.StatusForbidden, "forbidden", "Cannot change chat owner's role")
+			return
+		}
 	}
 
 	member := &models.ChatMember{
@@ -313,4 +400,279 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, member)
+}
+
+func (h *Handler) removeChatMember(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	userIDStr := chi.URLParam(r, "userID")
+	targetUserID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_user_id", "Invalid user ID")
+		return
+	}
+
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	// Check if caller is a member and get their role
+	var callerRole string
+	var isCallerMember bool
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			callerRole = m.Role
+			isCallerMember = true
+			break
+		}
+	}
+
+	if !isCallerMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	// Check if target is a member
+	var targetRole string
+	var isTargetMember bool
+	for _, m := range members {
+		if m.UserID == targetUserID {
+			targetRole = m.Role
+			isTargetMember = true
+			break
+		}
+	}
+
+	if !isTargetMember {
+		WriteError(w, http.StatusNotFound, "not_found", "User is not a member of this chat")
+		return
+	}
+
+	// Rules for removal:
+	// 1. User can remove themselves (leave chat)
+	// 2. Owner can remove anyone except themselves (must transfer ownership first)
+	// 3. Admin can remove regular members only
+	isSelfRemoval := targetUserID == claims.UserID
+
+	isLastMember := len(members) == 1
+
+	if isSelfRemoval {
+		// Owner can leave only if they are the last member (chat will be deleted)
+		if callerRole == models.ChatRoleOwner && !isLastMember {
+			WriteError(w, http.StatusForbidden, "forbidden", "Owner must transfer ownership before leaving or remove all other members first")
+			return
+		}
+	} else {
+		// Removing someone else
+		if callerRole != models.ChatRoleOwner && callerRole != models.ChatRoleAdmin {
+			WriteError(w, http.StatusForbidden, "forbidden", "Only owner or admin can remove members")
+			return
+		}
+
+		// Admin cannot remove owner or other admins
+		if callerRole == models.ChatRoleAdmin && (targetRole == models.ChatRoleOwner || targetRole == models.ChatRoleAdmin) {
+			WriteError(w, http.StatusForbidden, "forbidden", "Admin cannot remove owner or other admins")
+			return
+		}
+
+		// Only owner can remove other owners/admins or transfer ownership
+		if targetRole == models.ChatRoleOwner {
+			WriteError(w, http.StatusForbidden, "forbidden", "Cannot remove chat owner")
+			return
+		}
+	}
+
+	chatDeleted, err := h.storage.RemoveChatMember(r.Context(), chatID, targetUserID)
+	if err != nil {
+		h.logger.Error("failed to remove member", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to remove member")
+		return
+	}
+
+	response := map[string]interface{}{
+		"status":       "removed",
+		"chat_deleted": chatDeleted,
+	}
+	WriteJSON(w, http.StatusOK, response)
+}
+
+func getChatMember(members []*models.ChatMember, userID uuid.UUID) *models.ChatMember {
+	for _, m := range members {
+		if m.UserID == userID {
+			return m
+		}
+	}
+	return nil
+}
+
+func (h *Handler) muteChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Verify user is a member
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	if !isChatMember(members, claims.UserID) {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	if err := h.storage.MuteChat(r.Context(), chatID, claims.UserID); err != nil {
+		h.logger.Error("failed to mute chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to mute chat")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "muted"})
+}
+
+func (h *Handler) unmuteChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Verify user is a member
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	if !isChatMember(members, claims.UserID) {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	if err := h.storage.UnmuteChat(r.Context(), chatID, claims.UserID); err != nil {
+		h.logger.Error("failed to unmute chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to unmute chat")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "unmuted"})
+}
+
+func (h *Handler) pinChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Check if user is a member
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	isMember := false
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			break
+		}
+	}
+
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "Not a member of this chat")
+		return
+	}
+
+	if err := h.storage.PinChat(r.Context(), chatID, claims.UserID); err != nil {
+		h.logger.Error("failed to pin chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to pin chat")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "pinned"})
+}
+
+func (h *Handler) unpinChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Check if user is a member
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	isMember := false
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			break
+		}
+	}
+
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "Not a member of this chat")
+		return
+	}
+
+	if err := h.storage.UnpinChat(r.Context(), chatID, claims.UserID); err != nil {
+		h.logger.Error("failed to unpin chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to unpin chat")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "unpinned"})
 }

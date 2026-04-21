@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -26,12 +27,25 @@ const (
 	sendBufferSize = 256
 )
 
+// AllowedOrigins is set by the HTTP handler from configuration
+var AllowedOrigins = make(map[string]bool)
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// Allow all origins in development, configure properly in production
-		return true
+		origin := r.Header.Get("Origin")
+		// Allow requests with no origin (native apps)
+		if origin == "" {
+			return true
+		}
+		// Check against allowed origins
+		if AllowedOrigins[origin] {
+			return true
+		}
+		// In production, log suspicious attempts
+		// log.Printf("[WebSocket] Rejected connection from origin: %s", origin)
+		return false
 	},
 }
 
@@ -157,6 +171,7 @@ func (c *Client) handleMessage(msg *WSMessage) {
 		}
 		c.hub.JoinRoom(c, payload.ChatID)
 		c.rooms[payload.ChatID] = true
+		log.Printf("[WebSocket] User %s joined chat %s", c.UserID, payload.ChatID)
 
 	case "leave_chat":
 		var payload struct {
@@ -167,21 +182,21 @@ func (c *Client) handleMessage(msg *WSMessage) {
 		}
 		c.hub.LeaveRoom(c, payload.ChatID)
 		delete(c.rooms, payload.ChatID)
+		log.Printf("[WebSocket] User %s left chat %s", c.UserID, payload.ChatID)
 
 	case "typing":
 		var payload struct {
-			ChatID uuid.UUID `json:"chat_id"`
+			ChatID    uuid.UUID `json:"chat_id"`
+			IsTyping  bool      `json:"is_typing"`
+			FirstName string    `json:"first_name,omitempty"`
+			LastName  string    `json:"last_name,omitempty"`
 		}
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			return
 		}
-		// Broadcast typing indicator to room
-		c.hub.BroadcastToChat(&BroadcastMessage{
-			Type:          "typing",
-			ChatID:        payload.ChatID,
-			Payload:       map[string]interface{}{"user_id": c.UserID},
-			ExcludeSender: &c.UserID,
-		})
+		// Update typing state and broadcast to room
+		c.hub.SetTyping(payload.ChatID, c.UserID, payload.FirstName, payload.LastName, payload.IsTyping)
+		log.Printf("[WebSocket] Typing from user %s in chat %s (is_typing: %v)", c.UserID, payload.ChatID, payload.IsTyping)
 
 	case "read_receipt":
 		var payload struct {
@@ -196,10 +211,26 @@ func (c *Client) handleMessage(msg *WSMessage) {
 			Type:   "read_receipt",
 			ChatID: payload.ChatID,
 			Payload: map[string]interface{}{
-				"user_id":    c.UserID,
+				"reader_id":  c.UserID, // Matches client expectation
 				"message_id": payload.MessageID,
 			},
 			ExcludeSender: &c.UserID,
 		})
+
+	// WebRTC call events
+	case EventCallOffer:
+		c.hub.HandleCallOffer(c, msg.Payload)
+	case EventCallAnswer:
+		c.hub.HandleCallAnswer(c, msg.Payload)
+	case EventCallIce:
+		c.hub.HandleCallIce(c, msg.Payload)
+	case EventCallEnd:
+		c.hub.HandleCallEnd(c, msg.Payload)
+	case EventCallReject:
+		c.hub.HandleCallReject(c, msg.Payload)
+	case EventCallAccept:
+		c.hub.HandleCallAccept(c, msg.Payload)
+	case EventCallBusy:
+		c.hub.HandleCallBusy(c, msg.Payload)
 	}
 }

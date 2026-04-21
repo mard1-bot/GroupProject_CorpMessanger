@@ -108,6 +108,16 @@ export interface Message {
   read_by?: string[];
 }
 
+export interface FileAttachment {
+  id: string;
+  message_id: string;
+  name: string;
+  size: number;
+  mime_type: string;
+  url: string;
+  uploaded_at: string;
+}
+
 export interface AuthResponse {
   token: string;
   user: User;
@@ -266,6 +276,14 @@ class ApiClient {
     });
   }
 
+  async removeChatMember(chatId: string, userId: string): Promise<ApiResponse<{ status: string; chat_deleted?: boolean }>> {
+    return this.request('DELETE', `/api/v1/chats/${chatId}/members/${userId}`);
+  }
+
+  async deleteChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request('DELETE', `/api/v1/chats/${chatId}`);
+  }
+
   // Messages
   async sendMessage(
     chatId: string,
@@ -300,6 +318,126 @@ class ApiClient {
     if (offset !== undefined) params.append('offset', String(offset));
     const query = params.toString() ? `?${params.toString()}` : '';
     return this.request('GET', `/api/v1/chats/${chatId}/messages${query}`);
+  }
+
+  async searchMessages(
+    chatId: string,
+    query: string,
+    limit?: number,
+    offset?: number
+  ): Promise<ApiResponse<Message[]>> {
+    const params = new URLSearchParams();
+    params.append('q', query);
+    if (limit !== undefined) params.append('limit', String(limit));
+    if (offset !== undefined) params.append('offset', String(offset));
+    const queryString = params.toString() ? `?${params.toString()}` : '';
+    return this.request('GET', `/api/v1/chats/${chatId}/messages/search${queryString}`);
+  }
+
+  // Files
+  async uploadFile(
+    chatId: string,
+    messageId: string,
+    file: File | Blob,
+    filename: string,
+  ): Promise<ApiResponse<FileAttachment>> {
+    const formData = new FormData();
+    formData.append('file', file, filename);
+    
+    const url = `${this.baseUrl}/api/v1/chats/${chatId}/messages/${messageId}/files`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+    
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+      
+      if (!response.ok) {
+        return {
+          error: {
+            code: String(response.status),
+            message: `Upload failed: ${response.statusText}`,
+          },
+        };
+      }
+      
+      const data = await response.json();
+      return { data };
+    } catch (error) {
+      return {
+        error: {
+          code: 'network_error',
+          message: error instanceof Error ? error.message : 'Network request failed',
+        },
+      };
+    }
+  }
+
+  getFileUrl(url: string): string {
+    if (url.startsWith('http')) return url;
+    return `${API_URL}${url}`;
+  }
+
+  // Chat muting
+  async muteChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request<{ status: string }>('POST', `/api/v1/chats/${chatId}/mute`);
+  }
+
+  async unmuteChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request<{ status: string }>('POST', `/api/v1/chats/${chatId}/unmute`);
+  }
+
+  async leaveChat(chatId: string): Promise<ApiResponse<void>> {
+    return this.request<void>('POST', `/api/v1/chats/${chatId}/leave`);
+  }
+
+  // Chat pinning
+  async pinChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request<{ status: string }>('POST', `/api/v1/chats/${chatId}/pin`);
+  }
+
+  async unpinChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request<{ status: string }>('POST', `/api/v1/chats/${chatId}/unpin`);
+  }
+
+  // Notifications
+  async registerDeviceToken(data: {
+    token: string;
+    platform: 'ios' | 'android' | 'web';
+    device_name?: string;
+  }): Promise<ApiResponse<{ status: string }>> {
+    return this.request('POST', '/api/v1/devices/register', data);
+  }
+
+  async getNotificationSettings(): Promise<ApiResponse<{
+    push_enabled: boolean;
+    email_enabled: boolean;
+    email?: string;
+    quiet_hours_start?: string;
+    quiet_hours_end?: string;
+    quiet_hours_enabled: boolean;
+  }>> {
+    return this.request('GET', '/api/v1/notifications/settings');
+  }
+
+  async updateNotificationSettings(data: {
+    push_enabled: boolean;
+    email_enabled: boolean;
+    email?: string;
+    quiet_hours_start?: string;
+    quiet_hours_end?: string;
+    quiet_hours_enabled: boolean;
+  }): Promise<ApiResponse<any>> {
+    return this.request('PUT', '/api/v1/notifications/settings', data);
+  }
+
+  async getUnreadCount(): Promise<ApiResponse<{ total_unread: number }>> {
+    return this.request('GET', '/api/v1/notifications/unread');
   }
 }
 
