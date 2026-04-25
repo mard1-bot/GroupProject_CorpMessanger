@@ -1,8 +1,10 @@
 package http
 
 import (
+	"bufio"
 	"fmt"
 	"log/slog"
+	"net"
 	stdhttp "net/http"
 	"runtime/debug"
 	"time"
@@ -10,12 +12,32 @@ import (
 
 type responseWriter struct {
 	stdhttp.ResponseWriter
-	status int
+	status  int
+	written bool
 }
 
 func (rw *responseWriter) WriteHeader(status int) {
 	rw.status = status
 	rw.ResponseWriter.WriteHeader(status)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	if !rw.written {
+		rw.written = true
+		if rw.status == 0 {
+			rw.status = stdhttp.StatusOK
+		}
+	}
+	return rw.ResponseWriter.Write(b)
+}
+
+// Hijack implements http.Hijacker for WebSocket support
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := rw.ResponseWriter.(stdhttp.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not implement http.Hijacker")
+	}
+	return hijacker.Hijack()
 }
 func AccessLogMiddleware(logger *slog.Logger) func(stdhttp.Handler) stdhttp.Handler {
 	return func(next stdhttp.Handler) stdhttp.Handler {

@@ -44,4 +44,20 @@ export type Message = {
   created_at: string;
   updated_at?: string;
   read_by?: string[];
+  reactions?: Reaction[];
+  pinned?: boolean;
+  scheduled_at?: string;
+  thread_id?: string;
+};
+
+export type Reaction = {
+  id: string;
+  message_id: string;
+  user_id: string;
+  emoji: string;
+  user?: {
+    id: string;
+    first_name: string;
+    last_name: string;
+  };
 };

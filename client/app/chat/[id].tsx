@@ -19,9 +19,6 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
-import { MaterialIcons } from '@expo/vector-icons';
-import * as DocumentPicker from 'expo-document-picker';
-import dayjs from 'dayjs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
@@ -29,10 +26,16 @@ import { ThemedView } from '@/components/themed-view';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useAuth } from '@/contexts/auth-context';
 import { CallModal } from '@/components/call-modal';
+import { MessageReactions } from '@/components/message-reactions';
+import { MessageActionMenu } from '../../components/message-action-menu';
+import { ImagePreview } from '../../components/image-preview';
 import { api } from '@/services/api';
 import { wsService } from '@/services/websocket';
 import { Message, Chat, User } from '@/types/chat';
 import md5 from 'md5';
+import { MaterialIcons } from '@expo/vector-icons';
+import * as DocumentPicker from 'expo-document-picker';
+import dayjs from 'dayjs';
 
 // Gravatar helper with fallback
 const getGravatarUrl = (email: string, size = 48) => {
@@ -73,6 +76,8 @@ export default function ChatScreen() {
 
   // Action menu state (for web)
   const [actionMenuVisible, setActionMenuVisible] = useState(false);
+  const [messageMenuVisible, setMessageMenuVisible] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchVisible, setSearchVisible] = useState(false);
@@ -88,20 +93,52 @@ export default function ChatScreen() {
   const [callModalVisible, setCallModalVisible] = useState(false);
   const [callType, setCallType] = useState<'audio' | 'video'>('audio');
 
+  // Image preview state
+  const [imagePreviewVisible, setImagePreviewVisible] = useState(false);
+  const [previewImageUrl, setPreviewImageUrl] = useState('');
+  const [selectedFilePreview, setSelectedFilePreview] = useState<string | null>(null);
+
+  // Upload progress state
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploading, setUploading] = useState(false);
+
+  // Action menu handlers
+  const handleThreeDotsPress = useCallback((msg: Message) => {
+    setSelectedMessage(msg);
+    setActionMenuVisible(true);
+  }, []);
+
+  const handleMessageMenuPress = useCallback((msg: Message) => {
+    console.log('Message menu button pressed:', msg.id);
+    setSelectedMessage(msg);
+    setMessageMenuVisible(true);
+    console.log('Message menu visible set to true');
+  }, []);
+
+  const closeActionMenu = useCallback(() => {
+    setActionMenuVisible(false);
+    setSelectedMessage(null);
+  }, []);
+
+  const closeMessageMenu = useCallback(() => {
+    setMessageMenuVisible(false);
+    setSelectedMessage(null);
+  }, []);
+
   // Send typing indicator with debounce (max once per 3 seconds)
   const handleInputChange = useCallback((text: string) => {
     setInput(text);
     
-    if (!id || !wsService.isConnected()) return;
+    if (!id || !token) return;
     
     const now = Date.now();
-    const firstName = user?.first_name;
-    const lastName = user?.last_name;
     const trimmedText = text.trim();
     
     // Send typing start if not already active and debounce period passed
     if (!isTypingActiveRef.current && now - lastTypingSentRef.current > 3000) {
-      wsService.sendTyping(id, true, firstName, lastName);
+      api.sendTypingIndicator(id, true).catch(err => {
+        console.error('[Chat] Failed to send typing indicator:', err);
+      });
       lastTypingSentRef.current = now;
       isTypingActiveRef.current = true;
     }
@@ -120,7 +157,9 @@ export default function ChatScreen() {
     if (trimmedText.length > 0) {
       typingTimerRef.current = setTimeout(() => {
         if (isTypingActiveRef.current) {
-          wsService.sendTyping(id, true, firstName, lastName);
+          api.sendTypingIndicator(id, true).catch(err => {
+            console.error('[Chat] Failed to send typing indicator:', err);
+          });
           lastTypingSentRef.current = Date.now();
         }
       }, 500);
@@ -129,11 +168,13 @@ export default function ChatScreen() {
     // Set timer to stop typing indicator when user stops typing
     typingStopTimerRef.current = setTimeout(() => {
       if (isTypingActiveRef.current) {
-        wsService.sendTyping(id, false, firstName, lastName);
+        api.sendTypingIndicator(id, false).catch(err => {
+          console.error('[Chat] Failed to send typing indicator:', err);
+        });
         isTypingActiveRef.current = false;
       }
     }, 2000);
-  }, [id, user]);
+  }, [id, token]);
 
   // Cleanup typing timers on unmount or chat change
   useEffect(() => {
@@ -148,11 +189,13 @@ export default function ChatScreen() {
       }
       // Send typing stop if still active
       if (isTypingActiveRef.current && id) {
-        wsService.sendTyping(id, false, user?.first_name, user?.last_name);
+        api.sendTypingIndicator(id, false).catch(err => {
+          console.error('[Chat] Failed to send typing indicator:', err);
+        });
         isTypingActiveRef.current = false;
       }
     };
-  }, [id, user]);
+  }, [id, token]);
 
   const handleAttachFile = async () => {
     try {
@@ -160,10 +203,17 @@ export default function ChatScreen() {
         // Web: use file input
         const input = document.createElement('input');
         input.type = 'file';
+        input.accept = 'image/*,*/*';
         input.onchange = async (e: any) => {
           const file = e.target.files[0];
           if (file) {
+            // Create preview URL for images
+            let previewUrl: string | null = null;
+            if (file.type.startsWith('image/')) {
+              previewUrl = URL.createObjectURL(file);
+            }
             setSelectedFile({ uri: file.name, name: file.name, type: file.type, file });
+            setSelectedFilePreview(previewUrl);
           }
         };
         input.click();
@@ -181,11 +231,17 @@ export default function ChatScreen() {
             Alert.alert('Файл слишком большой', 'Максимальный размер файла 50MB');
             return;
           }
+          // Use URI as preview for images
+          let previewUrl: string | null = null;
+          if (asset.mimeType && asset.mimeType.startsWith('image/')) {
+            previewUrl = asset.uri;
+          }
           setSelectedFile({
             uri: asset.uri,
             name: asset.name,
             type: asset.mimeType || 'application/octet-stream',
           });
+          setSelectedFilePreview(previewUrl);
         }
       }
     } catch (error) {
@@ -413,10 +469,27 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!id || !token) return;
     console.log('[Chat] Loading messages for:', id);
-    api.getChatMessages(id, 50).then(res => {
+    api.getChatMessages(id, 50).then(async res => {
       console.log('[Chat] Messages loaded:', res.data?.length, 'error:', res.error?.message);
       if (res.data) {
-        setMessages(res.data);
+        // Load reactions for each message
+        const messagesWithReactions = await Promise.all(
+          res.data.map(async (msg) => {
+            try {
+              const reactionsRes = await api.getMessageReactions(msg.id);
+              console.log('[Chat] Loaded reactions for message', msg.id, ':', reactionsRes.data?.length || 0);
+              return {
+                ...msg,
+                reactions: reactionsRes.data || [],
+              };
+            } catch (error) {
+              console.error('[Chat] Failed to load reactions for message:', msg.id, error);
+              return msg;
+            }
+          })
+        );
+        console.log('[Chat] Messages with reactions loaded:', messagesWithReactions.length);
+        setMessages(messagesWithReactions);
       } else if (res.error) {
         console.error('[Chat] Failed to load messages:', res.error);
       }
@@ -462,18 +535,57 @@ export default function ChatScreen() {
           id: data.payload.id,
           chat_id: data.payload.chat_id,
           sender_id: data.payload.sender_id,
-          type: 'text',
+          type: data.payload.type || 'text',
           content: data.payload.content,
           created_at: data.payload.created_at,
           updated_at: data.payload.updated_at || data.payload.created_at,
         };
         setMessages(prev => [...prev, newMessage]);
+        // Auto-scroll to bottom when new message arrives
+        setTimeout(() => {
+          listRef.current?.scrollToEnd({ animated: true });
+        }, 100);
         // Remove typing indicator when message arrives
         setTypingUsers(prev => {
           const next = new Set(prev);
           next.delete(newMessage.sender_id);
           return next;
         });
+      } else if (data.type === 'reaction_added') {
+        const { message_id, user_id, emoji, user } = data.payload;
+        setMessages(prev => prev.map(m => {
+          if (m.id === message_id) {
+            const existingReaction = m.reactions?.find(r => r.user_id === user_id && r.emoji === emoji);
+            if (!existingReaction) {
+              return {
+                ...m,
+                reactions: [...(m.reactions || []), { id: `${message_id}-${user_id}-${emoji}`, message_id, user_id, emoji, user }]
+              };
+            }
+          }
+          return m;
+        }));
+      } else if (data.type === 'reaction_removed') {
+        const { message_id, user_id, emoji } = data.payload;
+        setMessages(prev => prev.map(m => {
+          if (m.id === message_id) {
+            return {
+              ...m,
+              reactions: (m.reactions || []).filter(r => !(r.user_id === user_id && r.emoji === emoji))
+            };
+          }
+          return m;
+        }));
+      } else if (data.type === 'message_pinned') {
+        const { message_id } = data.payload;
+        setMessages(prev => prev.map(m => 
+          m.id === message_id ? { ...m, pinned: true } : m
+        ));
+      } else if (data.type === 'message_unpinned') {
+        const { message_id } = data.payload;
+        setMessages(prev => prev.map(m => 
+          m.id === message_id ? { ...m, pinned: false } : m
+        ));
       } else if (data.type === 'typing') {
         console.log('[Chat] Typing event:', data.payload);
         const payload = data.payload;
@@ -575,6 +687,11 @@ export default function ChatScreen() {
     };
     setMessages(prev => [...prev, optimistic]);
     
+    // Auto-scroll to bottom when sending message
+    setTimeout(() => {
+      listRef.current?.scrollToEnd({ animated: true });
+    }, 100);
+    
     try {
       // Send message first
       const res = await api.sendMessage(id, trimmed || '[Файл]');
@@ -607,6 +724,10 @@ export default function ChatScreen() {
         }
       } else {
         setMessages(prev => prev.map(m => m.id === tempId ? res.data! : m));
+        // Auto-scroll after message is confirmed
+        setTimeout(() => {
+          listRef.current?.scrollToEnd({ animated: true });
+        }, 100);
       }
       
       // Clear selected file
@@ -635,10 +756,13 @@ export default function ChatScreen() {
     // In group chats, only owner/admin can delete others' messages
     const canDelete = isOwn || !isGroup || userRole === 'owner' || userRole === 'admin';
     const canEdit = isOwn; // Only own messages can be edited
-    
-    console.log('Long press:', { senderId: msg.sender_id, userId: user?.id, isOwn, isGroup, userRole, canDelete, canEdit });
-    
-    if (!canDelete && !canEdit) return;
+
+    console.log('Menu button pressed:', { senderId: msg.sender_id, userId: user?.id, isOwn, isGroup, userRole, canDelete, canEdit });
+
+    if (!canDelete && !canEdit) {
+      console.log('No permissions for message actions');
+      return;
+    }
 
     const options = [];
     if (canEdit) options.push('Редактировать');
@@ -772,10 +896,20 @@ export default function ChatScreen() {
     const handleOpenFile = () => {
       if (!msg.file_url) return;
       const url = api.getFileUrl(msg.file_url);
+      
+      // Check if it's an image file
+      const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'];
+      const isImage = imageExtensions.some(ext => url.toLowerCase().endsWith(ext));
+      
+      if (isImage) {
+        setPreviewImageUrl(url);
+        setImagePreviewVisible(true);
+        return;
+      }
+      
       if (Platform.OS === 'web') {
         window.open(url, '_blank');
       } else {
-        // For mobile, would use Linking
         Linking.openURL(url).catch(() => {
           Alert.alert('Ошибка', 'Не удалось открыть файл');
         });
@@ -783,7 +917,7 @@ export default function ChatScreen() {
     };
 
     const showMenuButton = canDeleteMessage || isOwn;
-    
+
     const bubbleContent = (
       <Pressable
         onLongPress={() => handleMessageLongPress(msg)}
@@ -808,6 +942,13 @@ export default function ChatScreen() {
         <ThemedText style={[styles.bubbleText, { color: textColor }]}>
           {msg.content}
         </ThemedText>
+        
+        {/* Reactions */}
+        <MessageReactions
+          reactions={msg.reactions || []}
+          compact={false}
+        />
+        
         <View style={styles.timeRow}>
           <ThemedText style={[styles.time, { color: textColor, opacity: 0.7 }]}>
             {dayjs(msg.created_at).format('HH:mm')}
@@ -819,6 +960,14 @@ export default function ChatScreen() {
           )}
           {showStatus && (
             <View style={styles.statusContainer}>
+              {uploading && (
+                <View style={styles.uploadProgressContainer}>
+                  <ActivityIndicator size="small" color={primaryColor} />
+                  <ThemedText style={styles.uploadProgressText}>
+                    Загрузка файла... {Math.round(uploadProgress)}%
+                  </ThemedText>
+                </View>
+              )}
               <StatusCheckmarks msg={msg} />
             </View>
           )}
@@ -828,13 +977,19 @@ export default function ChatScreen() {
 
     const menuButton = showMenuButton ? (
       <TouchableOpacity
-        onPress={() => handleMessageLongPress(msg)}
+        onPress={() => {
+          if (Platform.OS === 'web') {
+            handleMessageMenuPress(msg);
+          } else {
+            handleMessageLongPress(msg);
+          }
+        }}
         style={styles.messageMenuButton}
         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-        <MaterialIcons 
-          name="more-vert" 
-          size={18} 
-          color={iconColor} 
+        <MaterialIcons
+          name="more-vert"
+          size={18}
+          color={iconColor}
           style={{ opacity: 0.5 }}
         />
       </TouchableOpacity>
@@ -920,17 +1075,33 @@ export default function ChatScreen() {
           data={listItems}
           keyExtractor={(item) => item.key}
           renderItem={renderItem}
+          extraData={messages}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
           contentContainerStyle={[styles.list, { paddingTop: insets.bottom + 60 }]}
         />
         {selectedFile && (
           <View style={[styles.selectedFileRow, { backgroundColor: surfaceColor }]}>
-            <MaterialIcons name="insert-drive-file" size={20} color={primaryColor} />
+            {selectedFilePreview ? (
+              <Image 
+                source={{ uri: selectedFilePreview }} 
+                style={styles.selectedFilePreview}
+                resizeMode="cover"
+              />
+            ) : (
+              <MaterialIcons name="insert-drive-file" size={20} color={primaryColor} />
+            )}
             <ThemedText style={[styles.selectedFileName, { color: textColor }]} numberOfLines={1}>
               {selectedFile.name}
             </ThemedText>
-            <TouchableOpacity onPress={() => { setSelectedFile(null); }}>
+            <TouchableOpacity 
+              onPress={() => { 
+                setSelectedFile(null);
+                setSelectedFilePreview(null);
+                if (Platform.OS === 'web' && selectedFilePreview) {
+                  URL.revokeObjectURL(selectedFilePreview);
+                }
+              }}>
               <MaterialIcons name="close" size={20} color={iconColor} />
             </TouchableOpacity>
           </View>
@@ -1159,6 +1330,55 @@ export default function ChatScreen() {
         calleeName={other ? `${other.first_name} ${other.last_name}` : 'Пользователь'}
         callType={callType}
       />
+
+      {/* Message Action Menu Modal */}
+      <MessageActionMenu
+        visible={messageMenuVisible}
+        onClose={closeMessageMenu}
+        messageId={selectedMessage?.id || ''}
+        chatId={id || ''}
+        isOwn={selectedMessage?.sender_id === user?.id || false}
+        isGroup={isGroup}
+        userRole={userRole}
+        onDelete={deleteMessage}
+        onEdit={(messageId: string, content: string) => {
+          setEditingMessage({ id: messageId, content, sender_id: user?.id || '', chat_id: id || '', type: 'text', created_at: '', updated_at: '' } as Message);
+          setEditText(content);
+          setEditModalVisible(true);
+        }}
+        onPin={async (messageId: string) => {
+          try {
+            await api.pinMessage(id || '', messageId);
+            Alert.alert('Успешно', 'Сообщение закреплено');
+          } catch (error) {
+            Alert.alert('Ошибка', 'Не удалось закрепить сообщение');
+          }
+        }}
+        onUnpin={async (messageId: string) => {
+          try {
+            await api.unpinMessage(id || '', messageId);
+            Alert.alert('Успешно', 'Сообщение откреплено');
+          } catch (error) {
+            Alert.alert('Ошибка', 'Не удалось открепить сообщение');
+          }
+        }}
+        onForward={async (messageId: string) => {
+          try {
+            await api.forwardMessage(id || '', messageId);
+            Alert.alert('Успешно', 'Сообщение готово для пересылки');
+          } catch (error) {
+            Alert.alert('Ошибка', 'Не удалось переслать сообщение');
+          }
+        }}
+        messageContent={selectedMessage?.content}
+      />
+
+      {/* Image Preview Modal */}
+      <ImagePreview
+        visible={imagePreviewVisible}
+        onClose={() => setImagePreviewVisible(false)}
+        imageUrl={previewImageUrl}
+      />
     </ThemedView>
   );
 }
@@ -1169,31 +1389,66 @@ const styles = StyleSheet.create({
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   keyboard: { flex: 1 },
   list: { paddingHorizontal: 16, paddingTop: 16 },
-  dateRow: { alignItems: 'center', paddingVertical: 12 },
-  dateLabel: { fontSize: 13 },
-  messageRow: { marginBottom: 12 },
-  messageRowOwn: { justifyContent: 'flex-end', flexDirection: 'row' },
-  messageRowOther: { justifyContent: 'flex-start', flexDirection: 'row' },
-  senderInfo: { flexDirection: 'row', alignItems: 'center', marginBottom: 4, gap: 6 },
-  avatar: { width: 24, height: 24, borderRadius: 12 },
-  avatarFallback: { width: 24, height: 24, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
-  senderName: { fontSize: 12 },
+  listItem: { marginBottom: 12 },
+  dateRow: { justifyContent: 'center', marginVertical: 8 },
+  dateLabel: {
+    fontSize: 12,
+    color: '#999',
+    textAlign: 'center',
+  },
   bubble: Platform.select({
     web: { maxWidth: '75%', minWidth: 140, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18 },
     default: { maxWidth: '70%', paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18 },
   }),
-  bubbleOwn: { borderBottomRightRadius: 4, alignSelf: 'flex-end' },
-  bubbleOther: { borderBottomLeftRadius: 4, alignSelf: 'flex-start' },
+  bubbleOwn: {
+    alignSelf: 'flex-end',
+    borderBottomRightRadius: 4,
+  },
+  bubbleOther: {
+    alignSelf: 'flex-start',
+    borderBottomLeftRadius: 4,
+  },
+  bubbleText: {
+    fontSize: 16,
+    lineHeight: 22,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 6,
+  },
+  time: {
+    fontSize: 11,
+  },
+  editedLabel: {
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  statusContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  uploadProgressContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginRight: 8,
+  },
+  uploadProgressText: {
+    fontSize: 12,
+    opacity: 0.7,
+  },
+  senderName: { fontSize: 12 },
+  messageRow: { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-end' },
+  messageRowOwn: { justifyContent: 'flex-end' },
+  messageRowOther: { justifyContent: 'flex-start' },
   messageRowOtherGroup: { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-start' },
   avatarColumn: { marginRight: 8 },
   avatarLarge: { width: 40, height: 40, borderRadius: 20 },
   avatarFallbackLarge: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
   messageContentColumn: { flexDirection: 'column' },
   senderNameAbove: { fontSize: 12, marginBottom: 4 },
-  bubbleText: { fontSize: 16 },
-  timeRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4, gap: 6 },
-  time: { fontSize: 11 },
-  editedLabel: { fontSize: 10 },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, paddingTop: 12, gap: 8 },
   input: {
     flex: 1,
@@ -1206,11 +1461,10 @@ const styles = StyleSheet.create({
   },
   sendButton: { borderRadius: 22, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   headerBackButton: { paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center' },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 4, zIndex: 1 },
   headerIconButton: { paddingHorizontal: 8, paddingVertical: 8, justifyContent: 'center' },
   // Status and unread styles
   doubleCheck: { width: 22, height: 14, marginLeft: 2 },
-  statusContainer: { marginLeft: 4 },
   unreadDivider: { flexDirection: 'row', alignItems: 'center', marginVertical: 16, paddingHorizontal: 16 },
   unreadLine: { flex: 1, height: 1 },
   unreadText: { fontSize: 12, marginHorizontal: 12, fontWeight: '500' },
@@ -1224,10 +1478,21 @@ const styles = StyleSheet.create({
   modalButtonPrimary: { backgroundColor: '#007AFF', borderRadius: 8 },
   attachButton: { padding: 8, justifyContent: 'center', alignItems: 'center' },
   selectedFileRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
+  selectedFilePreview: { width: 40, height: 40, borderRadius: 8 },
   selectedFileName: { flex: 1, fontSize: 14 },
   fileAttachment: { flexDirection: 'row', alignItems: 'center', padding: 8, borderRadius: 8, marginBottom: 6, gap: 8 },
   fileName: { flex: 1, fontSize: 14 },
-  messageMenuButton: { padding: 4, justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-end', marginBottom: 4 },
+  messageMenuButton: {
+    padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
+    alignSelf: 'flex-end',
+    marginBottom: 4,
+  },
+  threeDotsButton: {
+    padding: 4,
+    opacity: 0.7,
+  },
   backButton: {},
   // Action menu styles (web)
   actionMenuOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.4)' },

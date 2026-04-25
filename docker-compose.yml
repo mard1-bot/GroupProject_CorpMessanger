@@ -8,6 +8,8 @@ services:
       POSTGRES_PASSWORD: postgres
     ports:
       - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   ejabberd:
     image: ejabberd/ecs:latest
@@ -35,10 +37,16 @@ services:
       HTTP_PORT: 8080
       LOG_LEVEL: debug
       DB_DSN: postgres://postgres:postgres@postgres:5432/corp_messenger?sslmode=disable
+      JWT_SECRET: your-secret-key-change-in-production
       XMPP_HOST: ejabberd
       XMPP_PORT: 5222
+      BASE_URL: http://localhost:8080
     ports:
       - "8080:8080"
+    volumes:
+      - uploads_data:/app/uploads
 
 volumes:
   ejabberd_data:
+  postgres_data:
+  uploads_data:

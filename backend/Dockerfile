@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
@@ -15,6 +15,9 @@ WORKDIR /app
 RUN addgroup -S app && adduser -S app -G app
 
 COPY --from=builder /app/api /app/api
+
+# Create uploads directory and set permissions for the app user
+RUN mkdir -p /app/uploads && chown -R app:app /app/uploads
 
 USER app
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,7 +64,8 @@ type Client struct {
 	UserID uuid.UUID
 
 	// Current chat rooms the client is subscribed to.
-	rooms map[uuid.UUID]bool
+	rooms   map[uuid.UUID]bool
+	roomsMu sync.RWMutex // Protects rooms map concurrent access
 }
 
 // WSMessage represents a message from client
@@ -170,7 +172,9 @@ func (c *Client) handleMessage(msg *WSMessage) {
 			return
 		}
 		c.hub.JoinRoom(c, payload.ChatID)
+		c.roomsMu.Lock()
 		c.rooms[payload.ChatID] = true
+		c.roomsMu.Unlock()
 		log.Printf("[WebSocket] User %s joined chat %s", c.UserID, payload.ChatID)
 
 	case "leave_chat":
@@ -181,7 +185,9 @@ func (c *Client) handleMessage(msg *WSMessage) {
 			return
 		}
 		c.hub.LeaveRoom(c, payload.ChatID)
+		c.roomsMu.Lock()
 		delete(c.rooms, payload.ChatID)
+		c.roomsMu.Unlock()
 		log.Printf("[WebSocket] User %s left chat %s", c.UserID, payload.ChatID)
 
 	case "typing":

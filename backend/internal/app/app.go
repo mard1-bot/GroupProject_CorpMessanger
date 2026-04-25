@@ -64,7 +64,7 @@ func New() (*App, error) {
 	}
 
 	// Create WebSocket hub
-	hub := websocket.NewHub()
+	hub := websocket.NewHub(stg)
 	go hub.Run()
 
 	// Initialize notification service
@@ -75,7 +75,20 @@ func New() (*App, error) {
 		notificationSvc = nil
 	}
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub, notificationSvc)
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub, notificationSvc, cfg.BaseURL, cfg.RateLimitRequests, cfg.RateLimitWindow, cfg.MaxRateLimitEntries)
+
+	// Start rate limiter cleanup goroutine to prevent memory exhaustion
+	apphttp.StartRateLimitCleanup()
+
+	// Start call cleanup goroutine to remove abandoned calls
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			hub.CallManager().CleanupAbandonedCalls(2 * time.Minute)
+		}
+	}()
+
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:           handler,
@@ -88,6 +101,7 @@ func New() (*App, error) {
 }
 
 func (a *App) Close() {
+	apphttp.StopRateLimitCleanup()
 	_ = a.Storage.Close()
 	_ = a.Ejabberd.Close()
 }

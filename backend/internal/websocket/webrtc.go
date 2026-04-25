@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -62,6 +63,7 @@ type ActiveCall struct {
 	CalleeID  uuid.UUID
 	Type      CallType
 	StartTime time.Time
+	Answered  bool
 	mu        sync.RWMutex
 }
 
@@ -131,11 +133,59 @@ func (cm *CallManager) IsUserInCall(userID uuid.UUID) bool {
 	return false
 }
 
+// CleanupAbandonedCalls removes calls that haven't been answered after timeout
+func (cm *CallManager) CleanupAbandonedCalls(timeout time.Duration) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	now := time.Now()
+	for callID, call := range cm.calls {
+		// Remove calls that haven't been answered and have exceeded timeout
+		if !call.Answered && now.Sub(call.StartTime) > timeout {
+			log.Printf("[WebRTC] Cleaning up abandoned call: %s (age: %s)", callID, now.Sub(call.StartTime))
+			delete(cm.calls, callID)
+		}
+	}
+}
+
+// MarkCallAsAnswered marks a call as answered
+func (cm *CallManager) MarkCallAsAnswered(callID uuid.UUID) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if call, exists := cm.calls[callID]; exists {
+		call.Answered = true
+		log.Printf("[WebRTC] Call marked as answered: %s", callID)
+	}
+}
+
 // HandleCallOffer processes a call offer
 func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	var offer CallOfferPayload
 	if err := json.Unmarshal(payload, &offer); err != nil {
 		log.Printf("[WebRTC] Invalid call offer: %v", err)
+		return
+	}
+
+	// Verify caller is in the chat room
+	h.mu.RLock()
+	room, callerInRoom := h.rooms[offer.ChatID]
+	if callerInRoom {
+		_, callerInRoom = room[client]
+	}
+	h.mu.RUnlock()
+
+	if !callerInRoom {
+		h.sendToClient(client, &BroadcastMessage{
+			Type:   EventCallError,
+			ChatID: offer.ChatID,
+			Payload: map[string]interface{}{
+				"call_id": "",
+				"error":   "not_chat_member",
+				"message": "You are not in this chat room",
+			},
+		})
+		log.Printf("[WebRTC] Call offer rejected: caller %s is not in chat room %s", client.UserID, offer.ChatID)
 		return
 	}
 
@@ -163,8 +213,30 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	offer.CallID = call.ID
 	offer.CallerID = client.UserID // Ensure caller ID matches authenticated user
 
-	// Broadcast to callee
-	h.BroadcastToChat(&BroadcastMessage{
+	// Find the callee client using userClients map
+	h.mu.RLock()
+	calleeClient := h.userClients[offer.CalleeID]
+	h.mu.RUnlock()
+
+	if calleeClient == nil {
+		// Callee is not online
+		h.sendToClient(client, &BroadcastMessage{
+			Type:   EventCallError,
+			ChatID: offer.ChatID,
+			Payload: map[string]interface{}{
+				"call_id":   "",
+				"error":     "callee_offline",
+				"message":   "User is not online",
+				"callee_id": offer.CalleeID,
+			},
+		})
+		log.Printf("[WebRTC] Call offer rejected: callee %s is not online", offer.CalleeID)
+		h.callManager.EndCall(call.ID)
+		return
+	}
+
+	// Send offer to specific callee
+	h.sendToClient(calleeClient, &BroadcastMessage{
 		Type:   EventCallOffer,
 		ChatID: offer.ChatID,
 		Payload: map[string]interface{}{
@@ -174,10 +246,16 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 			"type":      offer.Type,
 			"sdp":       offer.SDP,
 		},
-		ExcludeSender: &client.UserID,
 	})
 
 	log.Printf("[WebRTC] Call offer sent: %s to callee %s", call.ID, offer.CalleeID)
+
+	// Create system message for call initiated
+	go func() {
+		if err := h.CreateCallSystemMessage(context.Background(), offer.ChatID, client.UserID, "call_initiated"); err != nil {
+			log.Printf("[WebRTC] Failed to create call initiated message: %v", err)
+		}
+	}()
 }
 
 // HandleCallAnswer processes a call answer
@@ -194,18 +272,36 @@ func (h *Hub) HandleCallAnswer(client *Client, payload []byte) {
 		return
 	}
 
-	// Broadcast answer to caller
-	h.BroadcastToChat(&BroadcastMessage{
-		Type:   EventCallAnswer,
-		ChatID: call.ChatID,
-		Payload: map[string]interface{}{
-			"call_id": answer.CallID,
-			"sdp":     answer.SDP,
-		},
-		ExcludeSender: &client.UserID,
-	})
+	// Mark call as answered
+	h.callManager.MarkCallAsAnswered(answer.CallID)
+
+	// Find the caller client
+	h.mu.RLock()
+	callerClient := h.userClients[call.CallerID]
+	h.mu.RUnlock()
+
+	if callerClient != nil {
+		// Send answer to specific caller
+		h.sendToClient(callerClient, &BroadcastMessage{
+			Type:   EventCallAnswer,
+			ChatID: call.ChatID,
+			Payload: map[string]interface{}{
+				"call_id": answer.CallID,
+				"sdp":     answer.SDP,
+			},
+		})
+	} else {
+		log.Printf("[WebRTC] Caller not online for answer: %s", call.CallerID)
+	}
 
 	log.Printf("[WebRTC] Call answer sent: %s", answer.CallID)
+
+	// Create system message for call accepted
+	go func() {
+		if err := h.CreateCallSystemMessage(context.Background(), call.ChatID, client.UserID, "call_accepted"); err != nil {
+			log.Printf("[WebRTC] Failed to create call accepted message: %v", err)
+		}
+	}()
 }
 
 // HandleCallIce processes ICE candidates
@@ -222,18 +318,34 @@ func (h *Hub) HandleCallIce(client *Client, payload []byte) {
 		return
 	}
 
-	// Broadcast ICE candidate to the other party
-	h.BroadcastToChat(&BroadcastMessage{
-		Type:   EventCallIce,
-		ChatID: call.ChatID,
-		Payload: map[string]interface{}{
-			"call_id":         ice.CallID,
-			"candidate":       ice.Candidate,
-			"sdp_mline_index": ice.SDPMLineIndex,
-			"sdp_mid":         ice.SDPMid,
-		},
-		ExcludeSender: &client.UserID,
-	})
+	// Determine target user (the other party in the call)
+	var targetUserID uuid.UUID
+	if client.UserID == call.CallerID {
+		targetUserID = call.CalleeID
+	} else {
+		targetUserID = call.CallerID
+	}
+
+	// Find the target client
+	h.mu.RLock()
+	targetClient := h.userClients[targetUserID]
+	h.mu.RUnlock()
+
+	if targetClient != nil {
+		// Send ICE candidate to specific target
+		h.sendToClient(targetClient, &BroadcastMessage{
+			Type:   EventCallIce,
+			ChatID: call.ChatID,
+			Payload: map[string]interface{}{
+				"call_id":         ice.CallID,
+				"candidate":       ice.Candidate,
+				"sdp_mline_index": ice.SDPMLineIndex,
+				"sdp_mid":         ice.SDPMid,
+			},
+		})
+	} else {
+		log.Printf("[WebRTC] Target user not online for ICE: %s", targetUserID)
+	}
 }
 
 // HandleCallEnd ends a call
@@ -261,6 +373,13 @@ func (h *Hub) HandleCallEnd(client *Client, payload []byte) {
 	})
 
 	h.callManager.EndCall(data.CallID)
+
+	// Create system message for call ended
+	go func() {
+		if err := h.CreateCallSystemMessage(context.Background(), call.ChatID, client.UserID, "call_ended"); err != nil {
+			log.Printf("[WebRTC] Failed to create call ended message: %v", err)
+		}
+	}()
 }
 
 // HandleCallReject rejects a call
@@ -289,6 +408,13 @@ func (h *Hub) HandleCallReject(client *Client, payload []byte) {
 	})
 
 	h.callManager.EndCall(data.CallID)
+
+	// Create system message for call rejected
+	go func() {
+		if err := h.CreateCallSystemMessage(context.Background(), call.ChatID, client.UserID, "call_rejected"); err != nil {
+			log.Printf("[WebRTC] Failed to create call rejected message: %v", err)
+		}
+	}()
 }
 
 // HandleCallAccept accepts a call (sends ringing)

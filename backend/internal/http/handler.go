@@ -29,6 +29,7 @@ type Handler struct {
 	sessionDuration time.Duration
 	hub             *websocket.Hub
 	notificationSvc *notifications.Service
+	baseURL         string
 }
 
 // Rate limiting
@@ -38,10 +39,44 @@ type rateLimitEntry struct {
 }
 
 var (
-	rateLimits          = make(map[string]*rateLimitEntry)
-	rateLimitMux        sync.RWMutex
-	maxRateLimitEntries = 10000 // Hard limit to prevent memory exhaustion
+	rateLimits           = make(map[string]*rateLimitEntry)
+	rateLimitMux         sync.RWMutex
+	maxRateLimitEntries  = 10000 // Hard limit to prevent memory exhaustion (default, can be configured)
+	rateLimitStopChan    = make(chan struct{})
+	rateLimitCleanupOnce sync.Once
+	rateLimitRequests    = 20 // Default: 20 requests per window
+	rateLimitWindow      = 60 // Default: 60 seconds
 )
+
+// StartRateLimitCleanup starts a background goroutine that periodically cleans up expired rate limit entries
+func StartRateLimitCleanup() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rateLimitMux.Lock()
+				now := time.Now()
+				for k, v := range rateLimits {
+					if now.After(v.resetTime) {
+						delete(rateLimits, k)
+					}
+				}
+				rateLimitMux.Unlock()
+			case <-rateLimitStopChan:
+				return
+			}
+		}
+	}()
+}
+
+// StopRateLimitCleanup stops the rate limit cleanup goroutine
+func StopRateLimitCleanup() {
+	rateLimitCleanupOnce.Do(func() {
+		close(rateLimitStopChan)
+	})
+}
 
 // getClientIP extracts client IP with proxy-aware validation
 func getClientIP(r *stdhttp.Request) string {
@@ -52,8 +87,8 @@ func getClientIP(r *stdhttp.Request) string {
 			forwarded = forwarded[:idx]
 		}
 		forwarded = strings.TrimSpace(forwarded)
-		// Basic validation: must look like IP
-		if strings.Contains(forwarded, ".") || strings.Contains(forwarded, ":") {
+		// Basic validation: must look like a valid IP
+		if isValidIP(forwarded) {
 			return forwarded
 		}
 	}
@@ -62,56 +97,116 @@ func getClientIP(r *stdhttp.Request) string {
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
 		ip = ip[:idx]
 	}
-	return ip
+	// Validate the extracted IP
+	if isValidIP(ip) {
+		return ip
+	}
+	// If all else fails, use a sentinel value to still rate limit invalid IPs
+	// This prevents bypassing rate limiting with malformed IP addresses
+	return "invalid_ip"
 }
 
-// Simple rate limiter: 5 requests per minute per IP
+// isValidIP performs basic validation that a string looks like an IP address
+func isValidIP(ip string) bool {
+	if ip == "" {
+		return false
+	}
+	// Handle IPv6 zone IDs (e.g., fe80::1%eth0)
+	zoneIdx := strings.Index(ip, "%")
+	if zoneIdx != -1 {
+		ip = ip[:zoneIdx]
+	}
+	// Handle IPv6 addresses in brackets (e.g., [::1])
+	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
+		ip = ip[1 : len(ip)-1]
+	}
+	// Basic check: IPv4 has dots, IPv6 has colons
+	hasDots := strings.Contains(ip, ".")
+	hasColons := strings.Contains(ip, ":")
+	if !hasDots && !hasColons {
+		return false
+	}
+	// Should not have both (mixed format is invalid)
+	if hasDots && hasColons {
+		return false
+	}
+	// Basic length checks (after stripping zone ID and brackets)
+	if len(ip) < 7 || len(ip) > 45 { // Min IPv4: 1.1.1.1 (7), Max IPv6: 45 chars
+		return false
+	}
+	// Should only contain valid IP characters
+	for _, c := range ip {
+		valid := (c >= '0' && c <= '9') || c == '.' || c == ':' || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+		if !valid {
+			return false
+		}
+	}
+	return true
+}
+
+// Simple rate limiter: configurable requests per window per IP
 func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		ip := getClientIP(r)
 		now := time.Now()
 
 		rateLimitMux.Lock()
-
-		// Clean up expired entry if exists
 		entry, exists := rateLimits[ip]
-		if exists && now.After(entry.resetTime) {
-			delete(rateLimits, ip)
-			exists = false
-		}
-
-		// Create new entry if needed, with size limit enforcement
-		if !exists {
-			// Evict oldest entries if at capacity (simple eviction: clear expired entries first)
-			if len(rateLimits) >= maxRateLimitEntries {
-				for k, v := range rateLimits {
-					if now.After(v.resetTime) {
-						delete(rateLimits, k)
-					}
-				}
-				// If still at capacity, refuse new entries (defensive)
-				if len(rateLimits) >= maxRateLimitEntries {
-					rateLimitMux.Unlock()
-					WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Server overloaded, please try again later")
-					return
-				}
-			}
-
+		if !exists || now.After(entry.resetTime) {
 			rateLimits[ip] = &rateLimitEntry{
 				count:     1,
-				resetTime: now.Add(time.Minute),
+				resetTime: now.Add(time.Duration(rateLimitWindow) * time.Second),
 			}
 			rateLimitMux.Unlock()
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Increment count atomically under lock
 		entry.count++
+		rateLimits[ip] = entry
+
+		// Prevent memory exhaustion by limiting number of tracked IPs
+		if len(rateLimits) > maxRateLimitEntries {
+			// First, remove expired entries
+			now := time.Now()
+			for k, v := range rateLimits {
+				if now.After(v.resetTime) {
+					delete(rateLimits, k)
+				}
+			}
+			// If still over capacity, remove oldest entries by reset time
+			if len(rateLimits) > maxRateLimitEntries {
+				type ipTime struct {
+					ip        string
+					resetTime time.Time
+				}
+				entries := make([]ipTime, 0, len(rateLimits))
+				for k, v := range rateLimits {
+					entries = append(entries, ipTime{ip: k, resetTime: v.resetTime})
+				}
+				// Sort by reset time (oldest first)
+				for i := 0; i < len(entries); i++ {
+					for j := i + 1; j < len(entries); j++ {
+						if entries[i].resetTime.After(entries[j].resetTime) {
+							entries[i], entries[j] = entries[j], entries[i]
+						}
+					}
+				}
+				// Remove oldest 25% of entries
+				toRemove := len(entries) / 4
+				if toRemove < 1 {
+					toRemove = 1
+				}
+				for i := 0; i < toRemove; i++ {
+					delete(rateLimits, entries[i].ip)
+				}
+			}
+		}
+
 		count := entry.count
 		rateLimitMux.Unlock()
 
-		if count > 20 {
+		if count > rateLimitRequests {
 			WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
 			return
 		}
@@ -120,7 +215,17 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service, baseURL string, requests, window, entries int) stdhttp.Handler {
+	// Set configurable rate limit values
+	if requests > 0 {
+		rateLimitRequests = requests
+	}
+	if window > 0 {
+		rateLimitWindow = window
+	}
+	if entries > 0 {
+		maxRateLimitEntries = entries
+	}
 	// Build CORS origins map (lowercase for case-insensitive comparison)
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
@@ -128,8 +233,13 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		// Validate origin format: must start with http:// or https:// and not contain path
 		if strings.HasPrefix(origin, "http://") || strings.HasPrefix(origin, "https://") {
 			// Strip any path component - only keep scheme://host:port
-			if idx := strings.Index(origin[8:], "/"); idx != -1 {
-				origin = origin[:idx+8]
+			// Handle both http:// (7 chars) and https:// (8 chars)
+			schemeLen := 7
+			if strings.HasPrefix(origin, "https://") {
+				schemeLen = 8
+			}
+			if idx := strings.Index(origin[schemeLen:], "/"); idx != -1 {
+				origin = origin[:idx+schemeLen]
 			}
 			originsMap[origin] = true
 		}
@@ -147,6 +257,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		sessionDuration: sessionDuration,
 		hub:             hub,
 		notificationSvc: notificationSvc,
+		baseURL:         baseURL,
 	}
 
 	r := chi.NewRouter()
@@ -157,12 +268,13 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	r.Use(AccessLogMiddleware(logger))
 	r.Use(RecoverMiddleware(logger))
 	r.Use(middleware.StripSlashes)
+	r.Use(AuditMiddleware(storage, logger))
 
 	r.Get("/health", h.health)
 	r.Get("/ready", h.ready)
 
-	// WebSocket endpoint with auth middleware
-	r.With(AuthMiddleware(h.jwt, h.storage)).Get("/ws", h.handleWebSocket)
+	// WebSocket endpoint - auth handled in handler (supports token in query param)
+	r.Get("/ws", h.handleWebSocket)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Auth endpoints with rate limiting
@@ -176,8 +288,9 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Get("/auth/me", h.getCurrentUser)
 
 			r.Get("/users", h.getUsers)
-			r.Get("/users/{id}", h.getUserByID)
-			r.Put("/users/me", h.updateCurrentUser)
+			r.Put("/users/me/status", h.updateUserStatus)
+			r.Post("/users/me/avatar", h.uploadAvatar)
+			r.Get("/users/me/mentions", h.getUserMentions)
 
 			r.Post("/chats", h.createChat)
 			r.Get("/chats", h.getUserChats)
@@ -189,10 +302,25 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Post("/chats/{id}/unmute", h.unmuteChat)
 			r.Post("/chats/{id}/pin", h.pinChat)
 			r.Post("/chats/{id}/unpin", h.unpinChat)
+			r.Post("/chats/{id}/archive", h.archiveChat)
+			r.Post("/chats/{id}/unarchive", h.unarchiveChat)
+			r.Delete("/chats/{id}/me", h.softDeleteChat)
+			r.Delete("/chats/{id}/history", h.clearChatHistory)
+			r.Get("/chats/{id}/export", h.exportChat)
+			r.Post("/chats/{id}/avatar", h.uploadChatAvatar)
+
+			r.Post("/messages/{id}/reply", h.replyMessage)
+			r.Post("/messages/{id}/forward", h.forwardMessage)
+			r.Get("/messages/{id}/reactions", h.getMessageReactions)
+			r.Post("/reactions", h.addReaction)
+			r.Delete("/reactions", h.removeReaction)
+
+			r.Post("/typing", h.sendTypingIndicator)
 
 			r.Post("/chats/{id}/messages", h.sendMessage)
 			r.Get("/chats/{id}/messages", h.getChatMessages)
 			r.Get("/chats/{id}/messages/search", h.searchMessages)
+			r.Get("/messages/search", h.searchAllMessages)
 			r.Put("/chats/{id}/messages/{msgID}", h.editMessage)
 			r.Delete("/chats/{id}/messages/{msgID}", h.deleteMessage)
 			r.Post("/chats/{id}/messages/{msgID}/files", h.uploadFile)
@@ -202,6 +330,26 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Get("/notifications/settings", h.getNotificationSettings)
 			r.Put("/notifications/settings", h.updateNotificationSettings)
 			r.Get("/notifications/unread", h.getUnreadCount)
+
+			// E2E Encryption
+			r.Post("/encryption/keys", h.registerPublicKey)
+			r.Get("/encryption/keys/me", h.getMyPublicKey)
+			r.Get("/encryption/keys/user", h.getUserPublicKey)
+			r.Get("/encryption/keys/chat", h.getChatPublicKeys)
+
+			// Bookmarks
+			r.Post("/bookmarks", h.addBookmark)
+			r.Delete("/bookmarks/{id}", h.removeBookmark)
+			r.Get("/bookmarks", h.getBookmarks)
+
+			// Blocking
+			r.Post("/users/block", h.blockUser)
+			r.Delete("/users/block/{id}", h.unblockUser)
+			r.Get("/users/blocked", h.getBlockedUsers)
+
+			// Audit logs (admin only)
+			r.With(AdminOnly).Get("/audit/logs", h.getAuditLogs)
+			r.With(AdminOnly).Get("/audit/logs/all", h.getAllAuditLogs)
 		})
 	})
 
@@ -219,11 +367,20 @@ func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 		origin := strings.ToLower(r.Header.Get("Origin"))
 
 		// Validate origin format - must start with http:// or https:// and not contain path
-		if origin != "" && (!strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://") ||
-			strings.Contains(origin[7:], "/") || // path after http://
-			strings.Contains(origin[8:], "/")) { // path after https://
-			// Invalid origin format - treat as no origin
-			origin = ""
+		if origin != "" {
+			hasPath := false
+			if strings.HasPrefix(origin, "http://") {
+				hasPath = strings.Contains(origin[7:], "/")
+			} else if strings.HasPrefix(origin, "https://") {
+				hasPath = strings.Contains(origin[8:], "/")
+			} else {
+				// Invalid scheme
+				origin = ""
+			}
+			if hasPath {
+				// Invalid origin format - treat as no origin
+				origin = ""
+			}
 		}
 
 		// Only set CORS headers for whitelisted origins (case-insensitive)
@@ -268,11 +425,21 @@ func (h *Handler) handleWebSocket(w stdhttp.ResponseWriter, r *stdhttp.Request) 
 		return
 	}
 
-	// Get claims from context (set by AuthMiddleware)
+	// Get claims from context (set by AuthMiddleware) or from query parameter
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok || claims == nil {
-		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Authentication required for WebSocket")
-		return
+		// Try to get token from query parameter (for WebSocket connections)
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Authentication required for WebSocket")
+			return
+		}
+		var err error
+		claims, err = h.jwt.ParseToken(token)
+		if err != nil {
+			WriteError(w, stdhttp.StatusUnauthorized, "invalid_token", "Invalid or expired token")
+			return
+		}
 	}
 
 	if err := websocket.ServeWs(h.hub, w, r, claims.UserID); err != nil {

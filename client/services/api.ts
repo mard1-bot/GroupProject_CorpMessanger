@@ -106,6 +106,10 @@ export interface Message {
   created_at: string;
   updated_at?: string;
   read_by?: string[];
+  // E2E Encryption fields
+  encrypted_content?: string;
+  encrypted_keys?: Record<string, string>;
+  encryption_key_id?: string;
 }
 
 export interface FileAttachment {
@@ -396,6 +400,37 @@ class ApiClient {
     return this.request<void>('POST', `/api/v1/chats/${chatId}/leave`);
   }
 
+  // Reactions
+  async addReaction(messageId: string, emoji: string): Promise<ApiResponse<void>> {
+    return this.request<void>('POST', '/api/v1/reactions', { message_id: messageId, emoji });
+  }
+
+  async removeReaction(messageId: string, emoji: string): Promise<ApiResponse<void>> {
+    return this.request<void>('DELETE', '/api/v1/reactions', { message_id: messageId, emoji });
+  }
+
+  async getMessageReactions(messageId: string): Promise<ApiResponse<any[]>> {
+    return this.request<any[]>('GET', `/api/v1/messages/${messageId}/reactions`);
+  }
+
+  // Pinned messages
+  async pinMessage(chatId: string, messageId: string): Promise<ApiResponse<void>> {
+    return this.request<void>('POST', `/api/v1/chats/${chatId}/messages/pin`, { message_id: messageId });
+  }
+
+  async unpinMessage(chatId: string, messageId: string): Promise<ApiResponse<void>> {
+    return this.request<void>('DELETE', `/api/v1/chats/${chatId}/messages/pin`, { message_id: messageId });
+  }
+
+  async getPinnedMessages(chatId: string): Promise<ApiResponse<Message[]>> {
+    return this.request<Message[]>('GET', `/api/v1/chats/${chatId}/messages/pinned`);
+  }
+
+  // Forward message
+  async forwardMessage(chatId: string, messageId: string): Promise<ApiResponse<Message>> {
+    return this.request<Message>('POST', `/api/v1/messages/${messageId}/forward`, { chat_id: chatId });
+  }
+
   // Chat pinning
   async pinChat(chatId: string): Promise<ApiResponse<{ status: string }>> {
     return this.request<{ status: string }>('POST', `/api/v1/chats/${chatId}/pin`);
@@ -412,6 +447,22 @@ class ApiClient {
     device_name?: string;
   }): Promise<ApiResponse<{ status: string }>> {
     return this.request('POST', '/api/v1/devices/register', data);
+  }
+
+  async sendTypingIndicator(chatId: string, typing: boolean): Promise<ApiResponse<{ status: string }>> {
+    return this.request('POST', '/api/v1/typing', { chat_id: chatId, typing });
+  }
+
+  async scheduleMessage(chatId: string, content: string, scheduledAt: string): Promise<ApiResponse<Message>> {
+    return this.request<Message>('POST', `/api/v1/chats/${chatId}/messages/schedule`, { content, scheduled_at: scheduledAt });
+  }
+
+  async createThread(messageId: string): Promise<ApiResponse<Message>> {
+    return this.request<Message>('POST', `/api/v1/messages/${messageId}/thread`);
+  }
+
+  async getThreadMessages(threadId: string): Promise<ApiResponse<Message[]>> {
+    return this.request<Message[]>('GET', `/api/v1/threads/${threadId}/messages`);
   }
 
   async getNotificationSettings(): Promise<ApiResponse<{

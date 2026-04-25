@@ -22,6 +22,10 @@ type Config struct {
 	StorageEndpoint      string
 	CORSOrigins          []string
 	SessionDurationHours int
+	BaseURL              string
+	RateLimitRequests    int
+	RateLimitWindow      int
+	MaxRateLimitEntries  int
 }
 
 func Load() (Config, error) {
@@ -44,6 +48,10 @@ func Load() (Config, error) {
 	cfg.EjabberdHost = optional("EJABBERD_HOST")
 	cfg.EjabberdAPISecret = optional("EJABBERD_API_SECRET")
 	cfg.StorageEndpoint = optional("STORAGE_ENDPOINT")
+	cfg.BaseURL = optional("BASE_URL")
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = "http://localhost:8080" // Default for local development
+	}
 	if value := optional("EJABBERD_PORT"); value != "" {
 		port, convErr := strconv.Atoi(value)
 		if convErr != nil {
@@ -75,6 +83,38 @@ func Load() (Config, error) {
 	} else {
 		cfg.SessionDurationHours = 168 // Default 7 days
 	}
+
+	// Parse rate limit configuration
+	if requests := optional("RATE_LIMIT_REQUESTS"); requests != "" {
+		r, err := strconv.Atoi(requests)
+		if err != nil || r < 1 || r > 1000 {
+			return Config{}, fmt.Errorf("env RATE_LIMIT_REQUESTS must be between 1 and 1000")
+		}
+		cfg.RateLimitRequests = r
+	} else {
+		cfg.RateLimitRequests = 20 // Default 20 requests
+	}
+
+	if window := optional("RATE_LIMIT_WINDOW"); window != "" {
+		w, err := strconv.Atoi(window)
+		if err != nil || w < 1 || w > 3600 {
+			return Config{}, fmt.Errorf("env RATE_LIMIT_WINDOW must be between 1 and 3600 seconds")
+		}
+		cfg.RateLimitWindow = w
+	} else {
+		cfg.RateLimitWindow = 60 // Default 60 seconds (1 minute)
+	}
+
+	if entries := optional("MAX_RATE_LIMIT_ENTRIES"); entries != "" {
+		e, err := strconv.Atoi(entries)
+		if err != nil || e < 100 || e > 100000 {
+			return Config{}, fmt.Errorf("env MAX_RATE_LIMIT_ENTRIES must be between 100 and 100000")
+		}
+		cfg.MaxRateLimitEntries = e
+	} else {
+		cfg.MaxRateLimitEntries = 10000 // Default 10000 entries
+	}
+
 	return cfg, nil
 }
 

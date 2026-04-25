@@ -1,0 +1,29 @@
+[debug] [2026-04-21T17:04:13.406Z] ----------------------------------------------------------------------
+[debug] [2026-04-21T17:04:13.408Z] Command:       /usr/bin/node /usr/local/bin/firebase deploy --only hosting
+[debug] [2026-04-21T17:04:13.408Z] CLI Version:   15.15.0
+[debug] [2026-04-21T17:04:13.408Z] Platform:      linux
+[debug] [2026-04-21T17:04:13.409Z] Node Version:  v20.19.2
+[debug] [2026-04-21T17:04:13.409Z] Time:          Tue Apr 21 2026 20:04:13 GMT+0300 (Москва, стандартное время)
+[debug] [2026-04-21T17:04:13.409Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-04-21T17:04:14.119Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-04-21T17:04:14.119Z] > authorizing via signed-in user (luidesanta@gmail.com)
+[debug] [2026-04-21T17:04:14.120Z] [iam] checking project finchgram-corporate-messanger for permissions ["firebase.projects.get","firebasehosting.sites.update"]
+[debug] [2026-04-21T17:04:14.121Z] Checked if tokens are valid: true, expires at: 1776793866796
+[debug] [2026-04-21T17:04:14.121Z] Checked if tokens are valid: true, expires at: 1776793866796
+[debug] [2026-04-21T17:04:14.122Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions [none]
+[debug] [2026-04-21T17:04:14.122Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions  x-goog-user-project=finchgram-corporate-messanger
+[debug] [2026-04-21T17:04:14.122Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-04-21T17:04:19.165Z] *** [apiv2] error from fetch(https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions, {"headers":{},"method":"POST","body":"{\"permissions\":[\"firebase.projects.get\",\"firebasehosting.sites.update\"]}"}): FetchError: request to https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions failed, reason: Client network socket disconnected before secure TLS connection was established
+[debug] [2026-04-21T17:04:19.165Z] [iam] error while checking permissions, command may fail: Failed to make request to https://cloudresourcemanager.googleapis.com/v1/projects/finchgram-corporate-messanger:testIamPermissions
+[debug] [2026-04-21T17:04:19.165Z] Checked if tokens are valid: true, expires at: 1776793866796
+[debug] [2026-04-21T17:04:19.166Z] Checked if tokens are valid: true, expires at: 1776793866796
+[debug] [2026-04-21T17:04:19.166Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/finchgram-corporate-messanger [none]
+[debug] [2026-04-21T17:04:24.193Z] *** [apiv2] error from fetch(https://firebase.googleapis.com/v1beta1/projects/finchgram-corporate-messanger, {"headers":{},"method":"GET","signal":{"reason":""}}): FetchError: request to https://firebase.googleapis.com/v1beta1/projects/finchgram-corporate-messanger failed, reason: Client network socket disconnected before secure TLS connection was established
+[debug] [2026-04-21T17:04:24.193Z] Failed to make request to https://firebase.googleapis.com/v1beta1/projects/finchgram-corporate-messanger (original: request to https://firebase.googleapis.com/v1beta1/projects/finchgram-corporate-messanger failed, reason: Client network socket disconnected before secure TLS connection was established)
+[debug] [2026-04-21T17:04:29.197Z] Error: Timed out.
+    at Timeout._onTimeout (/usr/local/lib/node_modules/firebase-tools/lib/utils.js:309:49)
+    at listOnTimeout (node:internal/timers:581:17)
+    at process.processTimers (node:internal/timers:519:7)
+[error] 
+[error] Error: An unexpected error has occurred.

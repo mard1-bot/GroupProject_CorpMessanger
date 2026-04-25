@@ -1,6 +1,9 @@
 package websocket
 
 import (
+	"context"
+	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/storage"
 	"log"
 	"sync"
 	"time"
@@ -42,6 +45,9 @@ type Hub struct {
 	// WebRTC call manager
 	callManager *CallManager
 
+	// Storage for creating system messages
+	storage storage.Storage
+
 	mu sync.RWMutex
 }
 
@@ -55,7 +61,7 @@ type BroadcastMessage struct {
 }
 
 // NewHub creates a new Hub instance.
-func NewHub() *Hub {
+func NewHub(storage storage.Storage) *Hub {
 	return &Hub{
 		broadcast:   make(chan *BroadcastMessage, 256),
 		register:    make(chan *Client),
@@ -65,6 +71,7 @@ func NewHub() *Hub {
 		userClients: make(map[uuid.UUID]*Client),
 		typingState: make(map[uuid.UUID]map[uuid.UUID]*TypingState),
 		callManager: NewCallManager(),
+		storage:     storage,
 	}
 }
 
@@ -273,4 +280,60 @@ func (h *Hub) sendToClient(client *Client, msg *BroadcastMessage) {
 	default:
 		log.Printf("[Hub] Failed to send %s to client %s (channel full)", msg.Type, client.UserID)
 	}
+}
+
+// CallManager returns the call manager instance
+func (h *Hub) CallManager() *CallManager {
+	return h.callManager
+}
+
+// CreateCallSystemMessage creates a system message for call events
+func (h *Hub) CreateCallSystemMessage(ctx context.Context, chatID, userID uuid.UUID, eventType string) error {
+	if h.storage == nil {
+		return nil
+	}
+
+	var content string
+	switch eventType {
+	case "call_initiated":
+		content = "📞 Звонок начат"
+	case "call_accepted":
+		content = "✅ Звонок принят"
+	case "call_rejected":
+		content = "❌ Звонок отклонен"
+	case "call_ended":
+		content = "📞 Звонок завершен"
+	default:
+		return nil
+	}
+
+	// Create message in database
+	msg := &models.Message{
+		ChatID:   chatID,
+		SenderID: userID,
+		Type:     "system",
+		Content:  content,
+	}
+
+	if err := h.storage.CreateMessage(ctx, msg); err != nil {
+		log.Printf("[Hub] Failed to create call system message: %v", err)
+		return err
+	}
+
+	// Broadcast the system message via WebSocket
+	h.BroadcastToChat(&BroadcastMessage{
+		Type:   "new_message",
+		ChatID: chatID,
+		Payload: map[string]interface{}{
+			"id":         msg.ID,
+			"chat_id":    msg.ChatID,
+			"sender_id":  msg.SenderID,
+			"type":       msg.Type,
+			"content":    msg.Content,
+			"created_at": msg.CreatedAt,
+		},
+	})
+
+	log.Printf("[Hub] Created call system message: %s in chat %s", eventType, chatID)
+	return nil
 }
