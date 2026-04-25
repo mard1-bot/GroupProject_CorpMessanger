@@ -34,6 +34,7 @@ export function CallModal({
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [videoFallback, setVideoFallback] = useState(false);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -47,6 +48,10 @@ export function CallModal({
 
     const stateUnsub = callService.onStateChange((state) => {
       setCallState(state);
+      // Detect video fallback (call type changed from video to audio)
+      if (state && callType === 'video' && state.type === 'audio') {
+        setVideoFallback(true);
+      }
       if (state?.isEnded) {
         setTimeout(onClose, 1500);
       }
@@ -65,7 +70,7 @@ export function CallModal({
       localUnsub();
       remoteUnsub();
     };
-  }, [visible]);
+  }, [visible, callType]);
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -134,7 +139,8 @@ export function CallModal({
             {calleeName}
           </Text>
           <Text style={[styles.status, { color: '#888' }]}>
-            {isIncoming ? 'Входящий звонок...' :
+            {videoFallback ? 'Видео недоступно. Аудиозвонок...' :
+             isIncoming ? 'Входящий звонок...' :
              isConnecting ? 'Соединение...' :
              callState?.isRinging ? 'Звонит...' :
              callState?.isConnected ? 'В разговоре' : 'Звонок завершен'}
@@ -143,7 +149,7 @@ export function CallModal({
 
         {/* Video containers */}
         <View style={styles.videoContainer}>
-          {callType === 'video' && (
+          {callType === 'video' && !videoFallback && callState?.type === 'video' && (
             <>
               {/* Remote video (full screen) */}
               {remoteStream ? (
@@ -179,7 +185,7 @@ export function CallModal({
             </>
           )}
 
-          {callType === 'audio' && (
+          {(callType === 'audio' || videoFallback || callState?.type === 'audio') && (
             <View style={styles.audioContainer}>
               <View style={styles.avatar}>
                 <MaterialIcons name="person" size={100} color="#444" />

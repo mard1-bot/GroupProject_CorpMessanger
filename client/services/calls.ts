@@ -126,10 +126,32 @@ class CallService {
   async startCall(chatId: string, calleeId: string, type: CallType): Promise<void> {
     try {
       // Get local media stream
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: type === 'video',
-      });
+      const isVideoCall = type === 'video';
+      
+      try {
+        this.localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: isVideoCall,
+        });
+      } catch (mediaError: any) {
+        // If video fails, try audio-only as fallback
+        if (isVideoCall) {
+          console.warn('Video access failed, falling back to audio-only:', mediaError.message);
+          try {
+            this.localStream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: false,
+            });
+            type = 'audio'; // Update type to audio
+          } catch (audioError: any) {
+            console.error('Audio access also failed:', audioError.message);
+            throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
+          }
+        } else {
+          throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
+        }
+      }
+      
       this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
 
       // Create peer connection
@@ -180,10 +202,35 @@ class CallService {
 
       // Get local media stream
       if (!this.localStream) {
-        this.localStream = await navigator.mediaDevices.getUserMedia({
-          audio: true,
-          video: this.currentCall?.type === 'video',
-        });
+        const isVideoCall = this.currentCall?.type === 'video';
+        
+        try {
+          this.localStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: isVideoCall,
+          });
+        } catch (mediaError: any) {
+          // If video fails, try audio-only as fallback
+          if (isVideoCall) {
+            console.warn('Video access failed, falling back to audio-only:', mediaError.message);
+            try {
+              this.localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: false,
+              });
+              // Update call type to audio
+              if (this.currentCall) {
+                this.currentCall.type = 'audio';
+              }
+            } catch (audioError: any) {
+              console.error('Audio access also failed:', audioError.message);
+              throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
+            }
+          } else {
+            throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
+          }
+        }
+        
         this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
 
         // Add local tracks
