@@ -103,9 +103,13 @@ export interface Message {
   content: string;
   file_url?: string;
   reply_to?: string;
+  reply_to_content?: string;
+  reply_to_sender_name?: string;
   created_at: string;
   updated_at?: string;
   read_by?: string[];
+  forwarded_from?: string;
+  forwarded_sender_name?: string;
   // E2E Encryption fields
   encrypted_content?: string;
   encrypted_keys?: Record<string, string>;
@@ -238,6 +242,17 @@ class ApiClient {
     return this.request('GET', '/api/v1/auth/me');
   }
 
+  async changePassword(data: {
+    old_password: string;
+    new_password: string;
+  }): Promise<ApiResponse<{ status: string }>> {
+    return this.request('POST', '/api/v1/auth/change-password', data);
+  }
+
+  async deleteAccount(password: string): Promise<ApiResponse<{ status: string }>> {
+    return this.request('DELETE', '/api/v1/auth/me', { password });
+  }
+
   // Users
   async getUsers(search?: string, limit?: number): Promise<ApiResponse<User[]>> {
     const params = new URLSearchParams();
@@ -273,6 +288,13 @@ class ApiClient {
     return this.request('GET', `/api/v1/chats/${id}`);
   }
 
+  async updateChat(id: string, data: {
+    title?: string;
+    description?: string;
+  }): Promise<ApiResponse<Chat>> {
+    return this.request('PUT', `/api/v1/chats/${id}`, data);
+  }
+
   async addChatMember(chatId: string, userId: string, role?: string): Promise<ApiResponse<ChatMember>> {
     return this.request('POST', `/api/v1/chats/${chatId}/members`, {
       user_id: userId,
@@ -293,8 +315,9 @@ class ApiClient {
     chatId: string,
     content: string,
     type?: string,
+    replyTo?: string,
   ): Promise<ApiResponse<Message>> {
-    return this.request<Message>('POST', `/api/v1/chats/${chatId}/messages`, { content, type: type || 'text' });
+    return this.request<Message>('POST', `/api/v1/chats/${chatId}/messages`, { content, type: type || 'text', reply_to: replyTo });
   }
 
   async editMessage(
@@ -419,7 +442,7 @@ class ApiClient {
   }
 
   async unpinMessage(chatId: string, messageId: string): Promise<ApiResponse<void>> {
-    return this.request<void>('DELETE', `/api/v1/chats/${chatId}/messages/pin`, { message_id: messageId });
+    return this.request<void>('POST', `/api/v1/chats/${chatId}/messages/unpin`, { message_id: messageId });
   }
 
   async getPinnedMessages(chatId: string): Promise<ApiResponse<Message[]>> {
@@ -472,6 +495,7 @@ class ApiClient {
     quiet_hours_start?: string;
     quiet_hours_end?: string;
     quiet_hours_enabled: boolean;
+    protocol_preference?: 'websocket' | 'xmpp';
   }>> {
     return this.request('GET', '/api/v1/notifications/settings');
   }
@@ -483,12 +507,49 @@ class ApiClient {
     quiet_hours_start?: string;
     quiet_hours_end?: string;
     quiet_hours_enabled: boolean;
+    protocol_preference?: 'websocket' | 'xmpp';
   }): Promise<ApiResponse<any>> {
     return this.request('PUT', '/api/v1/notifications/settings', data);
   }
 
   async getUnreadCount(): Promise<ApiResponse<{ total_unread: number }>> {
     return this.request('GET', '/api/v1/notifications/unread');
+  }
+
+  async exportChat(chatId: string, limit?: number, offset?: number): Promise<ApiResponse<{
+    messages: Message[];
+    chat_id: string;
+    export_date: string;
+  }>> {
+    const params = new URLSearchParams();
+    if (limit) params.append('limit', limit.toString());
+    if (offset) params.append('offset', offset.toString());
+    const queryString = params.toString();
+    return this.request('GET', `/api/v1/chats/${chatId}/export${queryString ? '?' + queryString : ''}`);
+  }
+
+  async registerWebPushSubscription(data: {
+    endpoint: string;
+    key: string;
+    auth: string;
+  }): Promise<ApiResponse<any>> {
+    return this.request('POST', '/api/v1/notifications/web-push', data);
+  }
+
+  async unregisterWebPushSubscription(endpoint: string): Promise<ApiResponse<any>> {
+    return this.request('DELETE', '/api/v1/notifications/web-push', { endpoint });
+  }
+
+  async getAuditLogs(): Promise<ApiResponse<any[]>> {
+    return this.request('GET', '/api/v1/audit/logs');
+  }
+
+  async getAllAuditLogs(): Promise<ApiResponse<any[]>> {
+    return this.request('GET', '/api/v1/audit/logs/all');
+  }
+
+  async getAllUsers(): Promise<ApiResponse<User[]>> {
+    return this.request('GET', '/api/v1/users?all=true');
   }
 }
 

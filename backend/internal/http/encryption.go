@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"corp-messenger/backend/internal/auth"
+	"corp-messenger/backend/internal/crypto"
 	"corp-messenger/backend/internal/models"
 
 	"github.com/google/uuid"
@@ -25,6 +26,7 @@ type RegisterPublicKeyRequest struct {
 type PublicKeyResponse struct {
 	UserID     string `json:"user_id"`
 	PublicKey  string `json:"public_key"`
+	PrivateKey string `json:"private_key,omitempty"` // Decrypted private key (only returned to owner)
 	KeyVersion int    `json:"key_version"`
 	CreatedAt  string `json:"created_at"`
 	UpdatedAt  string `json:"updated_at"`
@@ -70,6 +72,9 @@ func (h *Handler) registerPublicKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate private key if provided
+	// SECURITY: Private keys are now encrypted at rest using envelope encryption with AES-256-GCM
+	// using a master key from the ENCRYPTION_MASTER_KEY environment variable.
+	var encryptedPrivateKey string
 	if req.PrivateKey != "" {
 		decodedPrivateKey, err := base64.StdEncoding.DecodeString(req.PrivateKey)
 		if err != nil {
@@ -79,6 +84,13 @@ func (h *Handler) registerPublicKey(w http.ResponseWriter, r *http.Request) {
 		// X25519 private key should be 32 bytes
 		if len(decodedPrivateKey) != 32 {
 			WriteError(w, http.StatusBadRequest, "invalid_key_length", "Private key must be 32 bytes (X25519)")
+			return
+		}
+		// Encrypt private key using envelope encryption
+		encryptedPrivateKey, err = crypto.Encrypt(req.PrivateKey)
+		if err != nil {
+			h.logger.Error("failed to encrypt private key", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to encrypt private key")
 			return
 		}
 	}
@@ -92,7 +104,11 @@ func (h *Handler) registerPublicKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if existingKey != nil {
 		// Key rotation is not yet implemented - prevent overwriting
-		// In the future, this should implement proper key rotation with version increment
+		// TODO: Implement proper key rotation with version increment:
+		// 1. Add key_version field to encryption_keys table
+		// 2. Store old key in archive table before replacement
+		// 3. Increment currentKeyVersion when rotating
+		// 4. Support multiple active key versions during migration period
 		WriteError(w, http.StatusConflict, "key_exists", "Encryption key already registered. Key rotation is not yet supported.")
 		return
 	}
@@ -100,7 +116,7 @@ func (h *Handler) registerPublicKey(w http.ResponseWriter, r *http.Request) {
 	key := &models.EncryptionKey{
 		UserID:     claims.UserID,
 		PublicKey:  req.PublicKey,
-		PrivateKey: req.PrivateKey,
+		PrivateKey: encryptedPrivateKey, // Store encrypted private key
 		KeyVersion: currentKeyVersion,
 	}
 
@@ -137,9 +153,21 @@ func (h *Handler) getMyPublicKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Decrypt private key before returning
+	var decryptedPrivateKey string
+	if key.PrivateKey != "" {
+		decryptedPrivateKey, err = crypto.Decrypt(key.PrivateKey)
+		if err != nil {
+			h.logger.Error("failed to decrypt private key", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to decrypt private key")
+			return
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, PublicKeyResponse{
 		UserID:     key.UserID.String(),
 		PublicKey:  key.PublicKey,
+		PrivateKey: decryptedPrivateKey, // Return decrypted private key
 		KeyVersion: key.KeyVersion,
 		CreatedAt:  key.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	})
@@ -151,6 +179,9 @@ func (h *Handler) getUserPublicKey(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
+
+	// Limit request body to 1KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 
 	userIDStr := r.URL.Query().Get("user_id")
 	if userIDStr == "" {
@@ -210,6 +241,9 @@ func (h *Handler) getChatPublicKeys(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
+
+	// Limit request body to 1KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 
 	chatIDStr := r.URL.Query().Get("chat_id")
 	if chatIDStr == "" {

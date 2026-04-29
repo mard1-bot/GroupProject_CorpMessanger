@@ -3,7 +3,9 @@ package websocket
 import (
 	"encoding/json"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,8 +27,38 @@ const (
 	maxMessageSize = 512 * 1024 // 512KB
 
 	// Send buffer size for client.
-	sendBufferSize = 256
+	sendBufferSize = 256 // Buffer size for WebSocket send channel
 )
+
+// getClientIP extracts the real client IP from request headers
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For header (for proxied requests)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// X-Forwarded-For can contain multiple IPs, take the first one
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			ip := strings.TrimSpace(ips[0])
+			// Validate IP format
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+	}
+
+	// Check X-Real-IP header
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		if net.ParseIP(xri) != nil {
+			return xri
+		}
+	}
+
+	// Fall back to RemoteAddr
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
 
 // AllowedOrigins is set by the HTTP handler from configuration
 var AllowedOrigins = make(map[string]bool)
@@ -36,16 +68,21 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
-		// Allow requests with no origin (native apps)
+
+		// SECURITY: Reject empty origin to prevent CORS bypass
+		// Native apps must provide a specific origin header
 		if origin == "" {
-			return true
+			log.Printf("[WebSocket] Rejected connection with empty origin from IP: %s", getClientIP(r))
+			return false
 		}
+
 		// Check against allowed origins
 		if AllowedOrigins[origin] {
 			return true
 		}
-		// In production, log suspicious attempts
-		// log.Printf("[WebSocket] Rejected connection from origin: %s", origin)
+
+		// Log all rejected origins for security monitoring
+		log.Printf("[WebSocket] Rejected connection from unauthorized origin: %s (IP: %s)", origin, getClientIP(r))
 		return false
 	},
 }

@@ -10,6 +10,9 @@ export const WS_EVENTS = {
   PRESENCE: 'presence',
   USER_JOINED: 'user_joined',
   USER_LEFT: 'user_left',
+  CHAT_CREATED: 'chat_created',
+  CHAT_DELETED: 'chat_deleted',
+  CHAT_UPDATED: 'chat_updated',
   ERROR: 'error',
   // WebRTC call events
   CALL_OFFER: 'call_offer',
@@ -85,6 +88,9 @@ class WebSocketService {
 
   private token: string | null = null;
 
+  // Message queue for messages sent while disconnected
+  private messageQueue: Array<{ type: string; payload: any }> = [];
+
   // Set auth token for WebSocket connection
   setToken(token: string): void {
     this.token = token;
@@ -119,6 +125,10 @@ class WebSocketService {
         this.reconnectAttempts = 0;
         this.reconnectDelay = 1000;
         this.startHeartbeat();
+        
+        // Send queued messages
+        this.flushMessageQueue();
+        
         this.onConnectCallbacks.forEach((cb) => cb());
         console.log('[WebSocket] Connected');
       };
@@ -179,7 +189,8 @@ class WebSocketService {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type, payload }));
     } else {
-      console.warn('[WebSocket] Cannot send, not connected');
+      console.warn('[WebSocket] Cannot send, not connected - queuing message');
+      this.messageQueue.push({ type, payload });
     }
   }
 
@@ -282,6 +293,21 @@ class WebSocketService {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
+    }
+  }
+
+  private flushMessageQueue(): void {
+    if (this.messageQueue.length === 0) {
+      return;
+    }
+    
+    console.log(`[WebSocket] Flushing ${this.messageQueue.length} queued messages`);
+    
+    while (this.messageQueue.length > 0) {
+      const message = this.messageQueue.shift();
+      if (message && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(message));
+      }
     }
   }
 }

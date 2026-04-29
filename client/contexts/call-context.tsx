@@ -24,6 +24,7 @@ interface CallProviderProps {
 export function CallProvider({ children }: CallProviderProps) {
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
   const [callerName, setCallerName] = useState<string>('Пользователь');
+  const [isGroupCall, setIsGroupCall] = useState(false);
   const [showIncomingCall, setShowIncomingCall] = useState(false);
 
   useEffect(() => {
@@ -33,10 +34,27 @@ export function CallProvider({ children }: CallProviderProps) {
       // Show incoming call modal when receiving a call
       if (state && !state.isCaller && !state.isConnected && !state.isRinging) {
         setShowIncomingCall(true);
-        // Fetch caller info
+        // Fetch caller info and chat info for group name
         api.getUserById(state.callerId).then(res => {
           if (res.data) {
-            setCallerName(`${res.data.first_name} ${res.data.last_name}`);
+            const callerFullName = `${res.data.first_name} ${res.data.last_name}`;
+            // Also fetch chat info to check if it's a group call
+            if (state.chatId) {
+              api.getChatById(state.chatId).then(chatRes => {
+                if (chatRes.data && chatRes.data.type === 'group') {
+                  setIsGroupCall(true);
+                  setCallerName(chatRes.data.title || callerFullName);
+                } else {
+                  setIsGroupCall(false);
+                  setCallerName(callerFullName);
+                }
+              }).catch(() => {
+                setIsGroupCall(false);
+                setCallerName(callerFullName);
+              });
+            } else {
+              setCallerName(callerFullName);
+            }
           }
         });
       }
@@ -52,11 +70,20 @@ export function CallProvider({ children }: CallProviderProps) {
     };
   }, []);
 
-  const handleAcceptCall = useCallback(() => {
+  const handleAcceptCall = useCallback(async () => {
+    console.log('Accept call pressed, currentCall:', currentCall);
     if (currentCall) {
-      callService.acceptCall(currentCall.callId, currentCall.chatId);
+      try {
+        console.log('Calling acceptCall with callId:', currentCall.callId, 'chatId:', currentCall.chatId);
+        await callService.acceptCall(currentCall.callId, currentCall.chatId);
+        setShowIncomingCall(false);
+        console.log('Call accepted successfully');
+      } catch (error) {
+        console.error('Failed to accept call:', error);
+      }
+    } else {
+      console.error('No current call to accept');
     }
-    setShowIncomingCall(false);
   }, [currentCall]);
 
   const handleRejectCall = useCallback(() => {
@@ -78,6 +105,7 @@ export function CallProvider({ children }: CallProviderProps) {
         <IncomingCall
           callState={currentCall}
           callerName={callerName}
+          isGroup={isGroupCall}
           onAccept={handleAcceptCall}
           onReject={handleRejectCall}
         />

@@ -1,0 +1,169 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: corp-postgres
+    environment:
+      POSTGRES_DB: corpmessenger
+      POSTGRES_USER: corpmessenger
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U corpmessenger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+  redis:
+    image: redis:7-alpine
+    container_name: corp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: corp-livekit
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS_FILE: /run/secrets/livekit_keys
+      LIVEKIT_REDIS_ADDRESS: "redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    secrets:
+      - livekit_keys
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  ejabberd:
+    image: ejabberd/ecs:24.07
+    container_name: corp-ejabberd
+    ports:
+      - "5222:5222"
+      - "5269:5269"
+      - "5280:5280"
+    volumes:
+      - ./backend/ejabberd:/home/kong/ejabberd/conf
+      - ./data/ejabberd:/home/kong/ejabberd/database
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: https://proxy.golang.org,direct
+    container_name: corp-backend
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      APP_ENV: production
+      HTTP_PORT: 8080
+      HTTPS_PORT: 8443
+      LOG_LEVEL: info
+      DATABASE_URL_FILE: /run/secrets/database_url
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      EJABBERD_HOST: localhost
+      EJABBERD_PORT: 5222
+      EJABBERD_USERNAME: admin
+      EJABBERD_PASSWORD_FILE: /run/secrets/ejabberd_password
+      EJABBERD_ADMIN_USER: admin@localhost
+      LIVEKIT_URL_FILE: /run/secrets/livekit_url
+      LIVEKIT_API_KEY_FILE: /run/secrets/livekit_api_key
+      LIVEKIT_API_SECRET_FILE: /run/secrets/livekit_api_secret
+      ENCRYPTION_MASTER_KEY_FILE: /run/secrets/encryption_master_key
+      CORS_ORIGINS_FILE: /run/secrets/cors_origins
+      ENABLE_HTTPS: "true"
+      TLS_CERT_PATH_FILE: /run/secrets/tls_cert_path
+      TLS_KEY_PATH_FILE: /run/secrets/tls_key_path
+      SCHEDULER_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ejabberd:
+        condition: service_started
+      livekit:
+        condition: service_started
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./data/uploads:/app/uploads
+    secrets:
+      - database_url
+      - jwt_secret
+      - ejabberd_password
+      - livekit_url
+      - livekit_api_key
+      - livekit_api_secret
+      - encryption_master_key
+      - cors_origins
+      - tls_cert_path
+      - tls_key_path
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /app/cache
+
+secrets:
+  postgres_password:
+    file: ./.secrets/postgres_password
+  database_url:
+    file: ./.secrets/database_url
+  jwt_secret:
+    file: ./.secrets/jwt_secret
+  ejabberd_password:
+    file: ./.secrets/ejabberd_password
+  livekit_url:
+    file: ./.secrets/livekit_url
+  livekit_api_key:
+    file: ./.secrets/livekit_api_key
+  livekit_api_secret:
+    file: ./.secrets/livekit_api_secret
+  livekit_keys:
+    file: ./.secrets/livekit_keys
+  encryption_master_key:
+    file: ./.secrets/encryption_master_key
+  cors_origins:
+    file: ./.secrets/cors_origins
+  tls_cert_path:
+    file: ./.secrets/tls_cert_path
+  tls_key_path:
+    file: ./.secrets/tls_key_path

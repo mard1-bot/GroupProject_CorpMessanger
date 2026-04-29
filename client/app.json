@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Для видеозвонков",
+        "NSMicrophoneUsageDescription": "Для аудиозвонков"
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -19,11 +23,21 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "notification": {
+        "vapidPublicKey": "BDdU_gSSV5QZKEKjJ5L5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X"
+      }
     },
     "plugins": [
       "expo-router",

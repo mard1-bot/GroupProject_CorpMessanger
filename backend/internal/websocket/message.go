@@ -8,14 +8,18 @@ import (
 
 // MessagePayload represents the data structure of a chat message.
 type MessagePayload struct {
-	ID        uuid.UUID  `json:"id"`
-	ChatID    uuid.UUID  `json:"chat_id"`
-	SenderID  uuid.UUID  `json:"sender_id"`
-	Type      string     `json:"type"`
-	Content   string     `json:"content"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt *time.Time `json:"updated_at,omitempty"`
-	ReplyTo   *uuid.UUID `json:"reply_to,omitempty"`
+	ID                  uuid.UUID  `json:"id"`
+	ChatID              uuid.UUID  `json:"chat_id"`
+	SenderID            uuid.UUID  `json:"sender_id"`
+	Type                string     `json:"type"`
+	Content             string     `json:"content"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           *time.Time `json:"updated_at,omitempty"`
+	ReplyTo             *uuid.UUID `json:"reply_to,omitempty"`
+	ReplyToContent      *string    `json:"reply_to_content,omitempty"`
+	ReplyToSenderName   *string    `json:"reply_to_sender_name,omitempty"`
+	ForwardedFrom       *uuid.UUID `json:"forwarded_from,omitempty"`
+	ForwardedSenderName *string    `json:"forwarded_sender_name,omitempty"`
 }
 
 // TypingPayload represents a typing indicator.
@@ -49,5 +53,8 @@ const (
 	EventPresence       = "presence"
 	EventUserJoined     = "user_joined"
 	EventUserLeft       = "user_left"
+	EventChatCreated    = "chat_created"
+	EventChatDeleted    = "chat_deleted"
+	EventChatUpdated    = "chat_updated"
 	EventError          = "error"
 )

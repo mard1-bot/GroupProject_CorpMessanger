@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -22,13 +23,18 @@ import (
 type SendMessageRequest struct {
 	Content          string                  `json:"content"`
 	Type             string                  `json:"type,omitempty"`
-	ReplyTo          string                  `json:"reply_to,omitempty"`
 	EncryptedContent string                  `json:"encrypted_content,omitempty"`
 	EncryptedKeys    map[string]string       `json:"encrypted_keys,omitempty"`
 	IV               string                  `json:"iv,omitempty"`
 	Location         *models.MessageLocation `json:"location,omitempty"`
 	Duration         *float64                `json:"duration,omitempty"`     // For voice messages in seconds
 	ScheduledAt      *time.Time              `json:"scheduled_at,omitempty"` // For scheduled messages
+	ReplyTo          string                  `json:"reply_to,omitempty"`
+	ThreadID         string                  `json:"thread_id,omitempty"` // For message threads
+}
+
+type ReplyMessageRequest struct {
+	Content string `json:"content"`
 }
 
 func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +241,46 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		msg.ReplyTo = &replyToID
+		// Set reply content for real-time display
+		msg.ReplyToContent = &replyMsg.Content
+		// Get sender name for reply
+		replySender, err := h.storage.GetUserByID(r.Context(), replyMsg.SenderID)
+		if err == nil && replySender != nil {
+			senderName := fmt.Sprintf("%s %s", replySender.FirstName, replySender.LastName)
+			msg.ReplyToSenderName = &senderName
+		}
+	}
+
+	// Handle thread_id for message threads
+	if req.ThreadID != "" {
+		threadID, err := uuid.Parse(req.ThreadID)
+		if err != nil {
+			WriteError(w, http.StatusBadRequest, "invalid_thread_id", "Invalid thread_id")
+			return
+		}
+		// Verify the thread message exists
+		threadMsg, err := h.storage.GetMessageByID(r.Context(), threadID)
+		if err != nil {
+			h.logger.Error("failed to get thread message", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
+			return
+		}
+		if threadMsg == nil {
+			WriteError(w, http.StatusBadRequest, "thread_not_found", "Thread message not found")
+			return
+		}
+		// Verify user is a member of the chat where the thread exists
+		member, err := h.storage.GetChatMember(r.Context(), threadMsg.ChatID, claims.UserID)
+		if err != nil {
+			h.logger.Error("failed to check chat membership", "error", err)
+			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
+			return
+		}
+		if member == nil {
+			WriteError(w, http.StatusForbidden, "not_in_chat", "You don't have access to this thread")
+			return
+		}
+		msg.ThreadID = &threadID
 	}
 
 	if err := h.storage.CreateMessage(r.Context(), msg); err != nil {
@@ -249,16 +295,60 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			Type:   websocket.EventNewMessage,
 			ChatID: chatID,
 			Payload: websocket.MessagePayload{
-				ID:        msg.ID,
-				ChatID:    msg.ChatID,
-				SenderID:  msg.SenderID,
-				Type:      msg.Type,
-				Content:   msg.Content,
-				CreatedAt: msg.CreatedAt,
-				ReplyTo:   msg.ReplyTo,
+				ID:                msg.ID,
+				ChatID:            msg.ChatID,
+				SenderID:          msg.SenderID,
+				Type:              msg.Type,
+				Content:           msg.Content,
+				CreatedAt:         msg.CreatedAt,
+				ReplyTo:           msg.ReplyTo,
+				ReplyToContent:    msg.ReplyToContent,
+				ReplyToSenderName: msg.ReplyToSenderName,
 			},
 			ExcludeSender: &claims.UserID,
 		})
+
+		// Broadcast chat list update to all members (synchronous chat list update)
+		for _, member := range members {
+			if member.UserID == claims.UserID {
+				continue // Skip sender to avoid duplication
+			}
+			h.hub.BroadcastToUser(member.UserID, &websocket.BroadcastMessage{
+				Type:   "chat_updated",
+				ChatID: chatID,
+				Payload: map[string]interface{}{
+					"chat_id": chatID,
+					"last_message": map[string]interface{}{
+						"id":         msg.ID,
+						"content":    msg.Content,
+						"sender_id":  msg.SenderID,
+						"type":       msg.Type,
+						"created_at": msg.CreatedAt,
+					},
+					"updated_at": msg.CreatedAt,
+				},
+			})
+		}
+	}
+
+	// Sync message to XMPP if hybrid mode is enabled
+	if h.syncService != nil {
+		senderJID := claims.UserID.String()
+		go func() {
+			// Panic recovery to ensure goroutine always terminates
+			defer func() {
+				if r := recover(); r != nil {
+					h.logger.Error("panic in XMPP sync goroutine", "recover", r)
+				}
+			}()
+
+			// Use background context with timeout to prevent goroutine accumulation
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := h.syncService.SyncMessageToXMPP(ctx, msg, senderJID); err != nil {
+				h.logger.Error("failed to sync message to XMPP", "error", err)
+			}
+		}()
 	}
 
 	// Send push notifications to offline users
@@ -284,7 +374,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			if sender != nil {
 				senderName = sender.FirstName + " " + sender.LastName
 			}
-			h.notifyMessageReceived(ctx, &msg, senderName)
+			h.notifyMessageReceived(ctx, &msgCopy, senderName)
 		}(senderID, msgCopy)
 	}
 
@@ -368,7 +458,9 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(messagesToMark) > 0 {
 		if err := h.storage.MarkMessagesAsRead(r.Context(), messagesToMark, claims.UserID); err != nil {
-			h.logger.Error("failed to mark messages as read", "error", err, "user_id", claims.UserID, "count", len(messagesToMark))
+			h.logger.Error("failed to mark messages as read - partial failure may cause inconsistent read state", "error", err, "user_id", claims.UserID, "count", len(messagesToMark))
+			// TODO: Implement individual message marking with retry logic to handle partial failures
+			// For now, we accept potential inconsistency as read receipts are not critical
 		}
 	}
 
@@ -393,6 +485,19 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+
+	// Debug: Log forwarded message data before sending
+	forwardedCount := 0
+	for _, msg := range messages {
+		if msg.ForwardedFrom != nil || msg.ForwardedSenderName != nil {
+			forwardedCount++
+			h.logger.Info("Forwarded message found",
+				"message_id", msg.ID,
+				"forwarded_from", msg.ForwardedFrom,
+				"forwarded_sender_name", msg.ForwardedSenderName)
+		}
+	}
+	h.logger.Info("Returning messages", "total", len(messages), "forwarded", forwardedCount)
 
 	WriteJSON(w, http.StatusOK, messages)
 }
@@ -541,6 +646,8 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		MessageID string `json:"message_id"`
 		Emoji     string `json:"emoji"`
@@ -670,6 +777,8 @@ func (h *Handler) removeReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		MessageID string `json:"message_id"`
 		Emoji     string `json:"emoji"`
@@ -806,6 +915,8 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		ChatID string `json:"chat_id"`
 	}
@@ -838,6 +949,27 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	if originalMsg == nil {
 		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
 		return
+	}
+
+	// Get original sender info
+	originalSender, err := h.storage.GetUserByID(r.Context(), originalMsg.SenderID)
+	if err != nil {
+		h.logger.Error("failed to get original sender", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get original sender info")
+		return
+	}
+	if originalSender == nil {
+		h.logger.Error("original sender not found", "sender_id", originalMsg.SenderID)
+		WriteError(w, http.StatusNotFound, "sender_not_found", "Original sender not found")
+		return
+	}
+	var originalSenderName string
+	originalSenderName = originalSender.FirstName + " " + originalSender.LastName
+	h.logger.Info("Generated sender name", "first_name", originalSender.FirstName, "last_name", originalSender.LastName, "combined", originalSenderName, "email", originalSender.Email)
+	// Trim and check if empty to handle cases where both names are empty
+	if strings.TrimSpace(originalSenderName) == "" {
+		originalSenderName = originalSender.Email
+		h.logger.Info("Using email as sender name", "email", originalSender.Email)
 	}
 
 	// Verify user is member of source chat (original message's chat)
@@ -882,12 +1014,20 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Create forwarded message
 	forwardedMsg := &models.Message{
-		ChatID:   chatID,
-		SenderID: claims.UserID,
-		Type:     originalMsg.Type,
-		Content:  originalMsg.Content,
-		FileURL:  originalMsg.FileURL,
+		ChatID:              chatID,
+		SenderID:            claims.UserID,
+		Type:                originalMsg.Type,
+		Content:             originalMsg.Content,
+		FileURL:             originalMsg.FileURL,
+		ForwardedFrom:       &originalMsg.SenderID,
+		ForwardedSenderName: &originalSenderName,
 	}
+
+	h.logger.Info("Creating forwarded message",
+		"original_sender", originalSenderName,
+		"forwarded_from", originalMsg.SenderID,
+		"forwarded_sender_name_ptr", forwardedMsg.ForwardedSenderName,
+		"target_chat", chatID)
 
 	if err := h.storage.CreateMessage(r.Context(), forwardedMsg); err != nil {
 		h.logger.Error("failed to create forwarded message", "error", err)
@@ -901,21 +1041,19 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 			Type:   websocket.EventNewMessage,
 			ChatID: forwardedMsg.ChatID,
 			Payload: websocket.MessagePayload{
-				ID:        forwardedMsg.ID,
-				ChatID:    forwardedMsg.ChatID,
-				SenderID:  forwardedMsg.SenderID,
-				Type:      forwardedMsg.Type,
-				Content:   forwardedMsg.Content,
-				CreatedAt: forwardedMsg.CreatedAt,
+				ID:                  forwardedMsg.ID,
+				ChatID:              forwardedMsg.ChatID,
+				SenderID:            forwardedMsg.SenderID,
+				Type:                forwardedMsg.Type,
+				Content:             forwardedMsg.Content,
+				CreatedAt:           forwardedMsg.CreatedAt,
+				ForwardedFrom:       forwardedMsg.ForwardedFrom,
+				ForwardedSenderName: forwardedMsg.ForwardedSenderName,
 			},
 		})
 	}
 
 	WriteJSON(w, http.StatusOK, forwardedMsg)
-}
-
-type ReplyMessageRequest struct {
-	Content string `json:"content"`
 }
 
 func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +1063,8 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req ReplyMessageRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
@@ -1014,13 +1154,15 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 			Type:   websocket.EventNewMessage,
 			ChatID: replyMsg.ChatID,
 			Payload: websocket.MessagePayload{
-				ID:        replyMsg.ID,
-				ChatID:    replyMsg.ChatID,
-				SenderID:  replyMsg.SenderID,
-				Type:      replyMsg.Type,
-				Content:   replyMsg.Content,
-				CreatedAt: replyMsg.CreatedAt,
-				ReplyTo:   replyMsg.ReplyTo,
+				ID:                replyMsg.ID,
+				ChatID:            replyMsg.ChatID,
+				SenderID:          replyMsg.SenderID,
+				Type:              replyMsg.Type,
+				Content:           replyMsg.Content,
+				CreatedAt:         replyMsg.CreatedAt,
+				ReplyTo:           replyMsg.ReplyTo,
+				ReplyToContent:    replyMsg.ReplyToContent,
+				ReplyToSenderName: replyMsg.ReplyToSenderName,
 			},
 			ExcludeSender: &claims.UserID,
 		})
@@ -1104,14 +1246,16 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 			Type:   websocket.EventMessageUpdated,
 			ChatID: msg.ChatID,
 			Payload: websocket.MessagePayload{
-				ID:        msg.ID,
-				ChatID:    msg.ChatID,
-				SenderID:  msg.SenderID,
-				Type:      msg.Type,
-				Content:   msg.Content,
-				CreatedAt: msg.CreatedAt,
-				UpdatedAt: &msg.UpdatedAt,
-				ReplyTo:   msg.ReplyTo,
+				ID:                msg.ID,
+				ChatID:            msg.ChatID,
+				SenderID:          msg.SenderID,
+				Type:              msg.Type,
+				Content:           msg.Content,
+				CreatedAt:         msg.CreatedAt,
+				UpdatedAt:         &msg.UpdatedAt,
+				ReplyTo:           msg.ReplyTo,
+				ReplyToContent:    msg.ReplyToContent,
+				ReplyToSenderName: msg.ReplyToSenderName,
 			},
 		})
 	}
@@ -1302,17 +1446,16 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	// Whitelist of allowed extensions
 	allowedExts := map[string]bool{
 		// Images
-		"jpg": true, "jpeg": true, "png": true, "gif": true, "webp": true, "bmp": true, "svg": true, "ico": true,
+		"jpg": true, "jpeg": true, "png": true, "gif": true, "webp": true, "bmp": true, "ico": true,
 		// Documents
 		"pdf": true, "doc": true, "docx": true, "txt": true, "rtf": true, "odt": true, "xls": true, "xlsx": true, "ppt": true, "pptx": true,
 		// Audio
 		"mp3": true, "wav": true, "ogg": true, "flac": true, "aac": true, "m4a": true,
 		// Video
 		"mp4": true, "mov": true, "avi": true, "mkv": true, "webm": true, "flv": true, "wmv": true,
-		// Archives
-		"zip": true, "rar": true, "7z": true, "tar": true, "gz": true, "bz2": true,
-		// Code
+		// Code (text-based, safe)
 		"json": true, "xml": true, "yaml": true, "yml": true, "csv": true,
+		// Note: Archives (zip, rar, 7z, tar, gz, bz2) and SVG removed for security reasons
 	}
 
 	// Validate extension - files without extension are not allowed for security
@@ -1329,6 +1472,30 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "invalid_extension", "File extension not allowed")
 		return
 	}
+
+	// Validate file content using magic bytes (first 512 bytes)
+	buffer := make([]byte, 512)
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		h.logger.Error("failed to read file header", "error", err)
+		WriteError(w, http.StatusBadRequest, "invalid_file", "Failed to read file")
+		return
+	}
+
+	// Seek back to beginning of file
+	if _, err := file.Seek(0, 0); err != nil {
+		h.logger.Error("failed to seek file", "error", err)
+		WriteError(w, http.StatusBadRequest, "invalid_file", "Failed to process file")
+		return
+	}
+
+	// Validate magic bytes match the declared extension
+	if !validateFileMagicBytes(buffer[:n], extLower) {
+		h.logger.Warn("File content does not match extension", "extension", extLower)
+		WriteError(w, http.StatusBadRequest, "invalid_file_content", "File content does not match declared type")
+		return
+	}
+
 	filename = fileID.String() + "." + extLower
 
 	// Create uploads directory if not exists
@@ -1414,6 +1581,8 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		ChatID string `json:"chat_id"`
 		Typing bool   `json:"typing"`
@@ -1463,4 +1632,348 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+}
+
+func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	messageID, err := uuid.Parse(req.MessageID)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		return
+	}
+
+	// Verify user is member of chat
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		return
+	}
+
+	isMember := false
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	if err := h.storage.PinMessage(r.Context(), chatID, messageID, claims.UserID); err != nil {
+		h.logger.Error("failed to pin message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to pin message")
+		return
+	}
+
+	// Broadcast pin event to chat members
+	if h.hub != nil {
+		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+			Type:   "message_pinned",
+			ChatID: chatID,
+			Payload: map[string]interface{}{
+				"message_id": messageID,
+			},
+		})
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "pinned"})
+}
+
+// startThread creates a new thread from a message
+func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	messageIDStr := chi.URLParam(r, "id")
+	messageID, err := uuid.Parse(messageIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		return
+	}
+
+	// Get the message to start thread from
+	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
+	if err != nil {
+		h.logger.Error("failed to get message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		return
+	}
+	if msg == nil {
+		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		return
+	}
+
+	// Check if user is member of the chat
+	members, err := h.storage.GetChatMembers(r.Context(), msg.ChatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	isMember := false
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	// If message already has a thread_id, return it
+	if msg.ThreadID != nil {
+		WriteJSON(w, http.StatusOK, map[string]interface{}{
+			"thread_id":  msg.ThreadID,
+			"message_id": msg.ID,
+		})
+		return
+	}
+
+	// Set thread_id to the message itself (creating a new thread)
+	msg.ThreadID = &messageID
+	if err := h.storage.UpdateMessage(r.Context(), msg); err != nil {
+		h.logger.Error("failed to update message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create thread")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"thread_id":  messageID,
+		"message_id": msg.ID,
+	})
+}
+
+// getThreadMessages retrieves messages in a thread
+func (h *Handler) getThreadMessages(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	threadIDStr := chi.URLParam(r, "id")
+	threadID, err := uuid.Parse(threadIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid thread ID")
+		return
+	}
+
+	// Parse pagination parameters
+	limit := 50
+	offset := 0
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if o, err := strconv.Atoi(offsetStr); err == nil && o >= 0 {
+			offset = o
+		}
+	}
+
+	// Get thread messages
+	messages, err := h.storage.GetThreadMessages(r.Context(), threadID, limit, offset)
+	if err != nil {
+		h.logger.Error("failed to get thread messages", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get thread messages")
+		return
+	}
+
+	// Check if user has access to at least one message in the thread
+	hasAccess := false
+	for _, msg := range messages {
+		members, err := h.storage.GetChatMembers(r.Context(), msg.ChatID)
+		if err != nil {
+			continue
+		}
+		for _, m := range members {
+			if m.UserID == claims.UserID {
+				hasAccess = true
+				break
+			}
+		}
+		if hasAccess {
+			break
+		}
+	}
+
+	if !hasAccess && len(messages) > 0 {
+		WriteError(w, http.StatusForbidden, "forbidden", "You don't have access to this thread")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"thread_id": threadID,
+		"messages":  messages,
+		"limit":     limit,
+		"offset":    offset,
+	})
+}
+
+func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	chatIDStr := chi.URLParam(r, "id")
+	chatID, err := uuid.Parse(chatIDStr)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	messageID, err := uuid.Parse(req.MessageID)
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		return
+	}
+
+	// Verify user is member of chat
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		h.logger.Error("failed to get chat members", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		return
+	}
+
+	isMember := false
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		return
+	}
+
+	if err := h.storage.UnpinMessage(r.Context(), chatID, messageID); err != nil {
+		h.logger.Error("failed to unpin message", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to unpin message")
+		return
+	}
+
+	// Broadcast unpin event to chat members
+	if h.hub != nil {
+		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
+			Type:   "message_unpinned",
+			ChatID: chatID,
+			Payload: map[string]interface{}{
+				"message_id": messageID,
+			},
+		})
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "unpinned"})
+}
+
+// validateFileMagicBytes checks if file content matches the declared extension using magic bytes
+func validateFileMagicBytes(data []byte, ext string) bool {
+	if len(data) < 4 {
+		return false
+	}
+
+	// Magic byte signatures for common file types
+	signatures := map[string][]byte{
+		// Images
+		"jpg":  {0xFF, 0xD8, 0xFF},
+		"jpeg": {0xFF, 0xD8, 0xFF},
+		"png":  {0x89, 0x50, 0x4E, 0x47},
+		"gif":  {0x47, 0x49, 0x46, 0x38},
+		"webp": {0x52, 0x49, 0x46, 0x46},
+		"bmp":  {0x42, 0x4D},
+		"ico":  {0x00, 0x00, 0x01, 0x00},
+		// Documents
+		"pdf":  {0x25, 0x50, 0x44, 0x46},
+		"doc":  {0xD0, 0xCF, 0x11, 0xE0},
+		"docx": {0x50, 0x4B, 0x03, 0x04},
+		"xls":  {0xD0, 0xCF, 0x11, 0xE0},
+		"xlsx": {0x50, 0x4B, 0x03, 0x04},
+		"ppt":  {0xD0, 0xCF, 0x11, 0xE0},
+		"pptx": {0x50, 0x4B, 0x03, 0x04},
+		// Audio
+		"mp3":  {0xFF, 0xFB},
+		"wav":  {0x52, 0x49, 0x46, 0x46},
+		"ogg":  {0x4F, 0x67, 0x67, 0x53},
+		"flac": {0x66, 0x4C, 0x61, 0x43},
+		"aac":  {0xFF, 0xF1},
+		"m4a":  {0x00, 0x00, 0x00, 0x20},
+		// Video
+		"mp4":  {0x00, 0x00, 0x00, 0x18},
+		"mov":  {0x00, 0x00, 0x00, 0x14},
+		"avi":  {0x52, 0x49, 0x46, 0x46},
+		"mkv":  {0x1A, 0x45, 0xDF, 0xA3},
+		"webm": {0x1A, 0x45, 0xDF, 0xA3},
+		// Code/Text files - harder to validate, allow any content
+		"json": nil,
+		"xml":  nil,
+		"yaml": nil,
+		"yml":  nil,
+		"csv":  nil,
+		"txt":  nil,
+		"rtf":  {0x7B, 0x5C, 0x72, 0x74, 0x66},
+		"odt":  {0x50, 0x4B, 0x03, 0x04},
+	}
+
+	sig, exists := signatures[ext]
+	if !exists || sig == nil {
+		// For text-based files or unknown signatures, allow
+		return true
+	}
+
+	// Check if the file starts with the expected magic bytes
+	for i, b := range sig {
+		if i >= len(data) || data[i] != b {
+			return false
+		}
+	}
+
+	return true
 }

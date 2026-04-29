@@ -22,12 +22,19 @@ type RegisterDeviceRequest struct {
 }
 
 type NotificationSettingsRequest struct {
-	PushEnabled       bool    `json:"push_enabled"`
-	EmailEnabled      bool    `json:"email_enabled"`
-	Email             string  `json:"email,omitempty"`
-	QuietHoursStart   *string `json:"quiet_hours_start,omitempty"`
-	QuietHoursEnd     *string `json:"quiet_hours_end,omitempty"`
-	QuietHoursEnabled bool    `json:"quiet_hours_enabled"`
+	PushEnabled        bool    `json:"push_enabled"`
+	EmailEnabled       bool    `json:"email_enabled"`
+	Email              string  `json:"email,omitempty"`
+	QuietHoursStart    *string `json:"quiet_hours_start,omitempty"`
+	QuietHoursEnd      *string `json:"quiet_hours_end,omitempty"`
+	QuietHoursEnabled  bool    `json:"quiet_hours_enabled"`
+	ProtocolPreference string  `json:"protocol_preference,omitempty"` // "websocket" or "xmpp"
+}
+
+type WebPushSubscriptionRequest struct {
+	Endpoint string `json:"endpoint"`
+	Key      string `json:"key"`
+	Auth     string `json:"auth"`
 }
 
 func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +44,8 @@ func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req RegisterDeviceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
@@ -91,42 +100,74 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req NotificationSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.logger.Error("failed to decode notification settings request", "error", err)
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
+	h.logger.Info("updateNotificationSettings called",
+		"user_id", claims.UserID,
+		"push_enabled", req.PushEnabled,
+		"email_enabled", req.EmailEnabled,
+		"quiet_hours_enabled", req.QuietHoursEnabled,
+		"quiet_hours_start", req.QuietHoursStart,
+		"quiet_hours_end", req.QuietHoursEnd)
+
 	// Validate quiet hours format (HH:MM)
 	timeRegex := regexp.MustCompile(`^([01]?[0-9]|2[0-3]):([0-5][0-9])$`)
 	if req.QuietHoursEnabled {
 		if req.QuietHoursStart != nil && !timeRegex.MatchString(*req.QuietHoursStart) {
+			h.logger.Error("invalid quiet_hours_start format", "value", *req.QuietHoursStart)
 			WriteError(w, http.StatusBadRequest, "invalid_time", "Quiet hours start must be in HH:MM format")
 			return
 		}
 		if req.QuietHoursEnd != nil && !timeRegex.MatchString(*req.QuietHoursEnd) {
+			h.logger.Error("invalid quiet_hours_end format", "value", *req.QuietHoursEnd)
 			WriteError(w, http.StatusBadRequest, "invalid_time", "Quiet hours end must be in HH:MM format")
 			return
 		}
 	}
 
+	// Validate protocol preference
+	if req.ProtocolPreference != "" && req.ProtocolPreference != "websocket" && req.ProtocolPreference != "xmpp" {
+		h.logger.Error("invalid protocol preference", "value", req.ProtocolPreference)
+		WriteError(w, http.StatusBadRequest, "invalid_protocol", "Protocol preference must be 'websocket' or 'xmpp'")
+		return
+	}
+
+	// Set default protocol_preference if not provided
+	protocolPreference := req.ProtocolPreference
+	if protocolPreference == "" {
+		protocolPreference = "websocket"
+	}
+
+	h.logger.Info("Creating notification settings",
+		"protocol_preference", protocolPreference,
+		"original_value", req.ProtocolPreference)
+
 	settings := &models.NotificationSettings{
-		UserID:            claims.UserID,
-		PushEnabled:       req.PushEnabled,
-		EmailEnabled:      req.EmailEnabled,
-		Email:             req.Email,
-		QuietHoursStart:   req.QuietHoursStart,
-		QuietHoursEnd:     req.QuietHoursEnd,
-		QuietHoursEnabled: req.QuietHoursEnabled,
+		UserID:             claims.UserID,
+		PushEnabled:        req.PushEnabled,
+		EmailEnabled:       req.EmailEnabled,
+		Email:              req.Email,
+		QuietHoursStart:    req.QuietHoursStart,
+		QuietHoursEnd:      req.QuietHoursEnd,
+		QuietHoursEnabled:  req.QuietHoursEnabled,
+		ProtocolPreference: protocolPreference,
 	}
 
 	if err := h.storage.UpdateNotificationSettings(r.Context(), settings); err != nil {
-		h.logger.Error("failed to update settings", "error", err)
+		h.logger.Error("failed to update notification settings in storage", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update settings")
 		return
 	}
 
+	h.logger.Info("notification settings updated successfully", "user_id", claims.UserID)
 	WriteJSON(w, http.StatusOK, settings)
 }
 
@@ -187,4 +228,97 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req WebPushSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	if req.Endpoint == "" || req.Key == "" || req.Auth == "" {
+		WriteError(w, http.StatusBadRequest, "missing_fields", "endpoint, key, and auth are required")
+		return
+	}
+
+	// Add length validation to prevent database bloat and DoS
+	const (
+		maxEndpointLength = 2048
+		maxKeyLength      = 256
+		maxAuthLength     = 256
+	)
+
+	if len(req.Endpoint) > maxEndpointLength {
+		WriteError(w, http.StatusBadRequest, "endpoint_too_long", fmt.Sprintf("endpoint must be at most %d characters", maxEndpointLength))
+		return
+	}
+	if len(req.Key) > maxKeyLength {
+		WriteError(w, http.StatusBadRequest, "key_too_long", fmt.Sprintf("key must be at most %d characters", maxKeyLength))
+		return
+	}
+	if len(req.Auth) > maxAuthLength {
+		WriteError(w, http.StatusBadRequest, "auth_too_long", fmt.Sprintf("auth must be at most %d characters", maxAuthLength))
+		return
+	}
+
+	subscription := &models.WebPushSubscription{
+		ID:        uuid.New(),
+		UserID:    claims.UserID,
+		Endpoint:  req.Endpoint,
+		Key:       req.Key,
+		Auth:      req.Auth,
+		CreatedAt: time.Now(),
+	}
+
+	if err := h.storage.CreateWebPushSubscription(r.Context(), subscription); err != nil {
+		h.logger.Error("failed to create web push subscription", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create subscription")
+		return
+	}
+
+	WriteJSON(w, http.StatusCreated, map[string]interface{}{
+		"message": "Web push subscription registered",
+	})
+}
+
+func (h *Handler) unregisterWebPushSubscription(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req WebPushSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	if req.Endpoint == "" {
+		WriteError(w, http.StatusBadRequest, "missing_fields", "endpoint is required")
+		return
+	}
+
+	if err := h.storage.DeleteWebPushSubscription(r.Context(), claims.UserID, req.Endpoint); err != nil {
+		h.logger.Error("failed to delete web push subscription", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete subscription")
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"message": "Web push subscription deleted",
+	})
 }

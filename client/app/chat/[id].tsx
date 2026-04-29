@@ -1,25 +1,28 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import {
   View,
+  Text,
   TextInput,
-  FlatList,
   TouchableOpacity,
-  Pressable,
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  useWindowDimensions,
+  ScrollView,
+  FlatList,
   Alert,
-  Image,
-  ActionSheetIOS,
   Modal,
-  Linking,
+  Image,
   ActivityIndicator,
+  useWindowDimensions,
+  Linking,
+  ActionSheetIOS,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as FileSystem from 'expo-file-system';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -51,10 +54,11 @@ type ListItem =
 
 export default function ChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
-  const { token, user } = useAuth();
-  const router = useRouter();
   const navigation = useNavigation();
+  const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { user, token } = useAuth();
+
   const { width } = useWindowDimensions();
   const listRef = useRef<FlatList<ListItem>>(null);
 
@@ -64,6 +68,8 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(true);
   const [membersMap, setMembersMap] = useState<Record<string, User>>({});
   const [userRole, setUserRole] = useState<string>('');
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [currentPinnedIndex, setCurrentPinnedIndex] = useState(0);
   
   // Edit modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -102,7 +108,196 @@ export default function ChatScreen() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
 
-  // Action menu handlers
+  // Forward chat selection state
+  const [forwardModalVisible, setForwardModalVisible] = useState(false);
+  const [forwardingMessageId, setForwardingMessageId] = useState<string | null>(null);
+  const [userChats, setUserChats] = useState<any[]>([]);
+
+  // Load user chats for forwarding
+  const loadUserChats = async () => {
+    try {
+      const response = await api.getUserChats();
+      if (response.data) {
+        // Filter out current chat and load members for each chat
+        const otherChats = response.data.filter((chat: any) => chat.id !== id);
+        
+        // Load members for each chat to get user names for direct chats
+        const chatsWithMembers = await Promise.all(
+          otherChats.map(async (chat: any) => {
+            try {
+              const chatRes = await api.getChatById(chat.id);
+              return { ...chat, members: chatRes.data?.members || [] };
+            } catch (error) {
+              console.error('Failed to load chat members for', chat.id, error);
+              return { ...chat, members: [] };
+            }
+          })
+        );
+        
+        setUserChats(chatsWithMembers);
+      }
+    } catch (error) {
+      console.error('Failed to load chats:', error);
+    }
+  };
+
+  // Load messages for the chat
+  const loadMessages = async () => {
+    if (!id || !token) return;
+    console.log('[Chat] Loading messages for:', id);
+    try {
+      const res = await api.getChatMessages(id, 50);
+      console.log('[Chat] Messages loaded:', res.data?.length, 'error:', res.error?.message);
+      if (res.data) {
+        // Load reactions for each message
+        const messagesWithReactions = await Promise.all(
+          res.data.map(async (msg) => {
+            try {
+              const reactionsRes = await api.getMessageReactions(msg.id);
+              console.log('[Chat] Loaded reactions for message', msg.id, ':', reactionsRes.data?.length || 0);
+              return {
+                ...msg,
+                reactions: reactionsRes.data || [],
+              };
+            } catch (error) {
+              console.error('[Chat] Failed to load reactions for message:', msg.id, error);
+              return msg;
+            }
+          })
+        );
+        console.log('[Chat] Messages with reactions loaded:', messagesWithReactions.length);
+        setMessages(messagesWithReactions);
+      } else if (res.error) {
+        console.error('[Chat] Failed to load messages:', res.error);
+      }
+    } catch (err) {
+      console.error('[Chat] Exception loading messages:', err);
+    }
+  };
+
+  const handleForward = (messageId: string) => {
+    console.log('[Chat] Forward message:', messageId);
+    setForwardingMessageId(messageId);
+    loadUserChats();
+    setForwardModalVisible(true);
+  };
+
+  const handleExportChat = async () => {
+    console.log('[Chat] Export button pressed, id:', id);
+    if (!id) {
+      console.log('[Chat] Export failed: no id');
+      Alert.alert('Ошибка', 'Нет ID чата');
+      return;
+    }
+
+    console.log('[Chat] Showing export alert');
+    
+    // Use window.confirm for web, Alert.alert for native
+    if (typeof window !== 'undefined' && window.confirm) {
+      const confirmed = window.confirm('Экспортировать историю сообщений?');
+      if (!confirmed) {
+        console.log('[Chat] Export cancelled by user');
+        return;
+      }
+      console.log('[Chat] Export confirmed, calling API');
+    } else {
+      Alert.alert(
+        'Экспорт чата',
+        'Экспортировать историю сообщений?',
+        [
+          { text: 'Отмена', style: 'cancel' },
+          {
+            text: 'Экспорт',
+            onPress: async () => {
+              console.log('[Chat] Export confirmed, calling API');
+              try {
+                const response = await api.exportChat(id, 1000, 0);
+                console.log('[Chat] Export API response:', response);
+                if (response.data && response.data.messages) {
+                  const exportData = {
+                    chat_id: response.data.chat_id,
+                    export_date: response.data.export_date,
+                    messages: response.data.messages,
+                    total_messages: response.data.messages.length,
+                  };
+
+                  const jsonString = JSON.stringify(exportData, null, 2);
+
+                  if (typeof document !== 'undefined') {
+                    // Web: download via blob
+                    const blob = new Blob([jsonString], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `chat_export_${id}_${new Date().toISOString().split('T')[0]}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    Alert.alert('Успех', 'Чат экспортирован');
+                  } else {
+                    // Mobile: save to file system
+                    const fileName = `chat_export_${id}_${new Date().toISOString().split('T')[0]}.json`;
+                    const fileUri = (FileSystem as any).documentDirectory + fileName;
+                    
+                    await FileSystem.writeAsStringAsync(fileUri, jsonString);
+                    
+                    const fileInfo = await FileSystem.getInfoAsync(fileUri);
+                    if (fileInfo.exists) {
+                      Alert.alert('Успех', `Чат экспортирован: ${fileUri}`);
+                    } else {
+                      Alert.alert('Ошибка', 'Не удалось сохранить файл');
+                    }
+                  }
+                } else {
+                  Alert.alert('Ошибка', 'Нет данных для экспорта');
+                }
+              } catch (error) {
+                console.error('[Chat] Export error:', error);
+                Alert.alert('Ошибка', 'Не удалось экспортировать чат');
+              }
+            }
+          }
+        ]
+      );
+      console.log('[Chat] Export alert shown');
+      return;
+    }
+
+    // Web export logic
+    try {
+      const response = await api.exportChat(id, 1000, 0);
+      console.log('[Chat] Export API response:', response);
+      if (response.data && response.data.messages) {
+        const exportData = {
+          chat_id: response.data.chat_id,
+          export_date: response.data.export_date,
+          messages: response.data.messages,
+          total_messages: response.data.messages.length,
+        };
+
+        const jsonString = JSON.stringify(exportData, null, 2);
+
+        // Web: download via blob
+        const blob = new Blob([jsonString], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `chat_export_${id}_${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        Alert.alert('Успех', 'Чат экспортирован');
+      } else {
+        Alert.alert('Ошибка', 'Нет данных для экспорта');
+      }
+    } catch (error) {
+      console.error('[Chat] Export error:', error);
+      Alert.alert('Ошибка', 'Не удалось экспортировать чат');
+    }
+  };
+
   const handleThreeDotsPress = useCallback((msg: Message) => {
     setSelectedMessage(msg);
     setActionMenuVisible(true);
@@ -289,6 +484,7 @@ export default function ChatScreen() {
   const onMorePress = useCallback(() => {
     console.log('onMorePress called, isGroup:', isGroup, 'chat:', chat);
     if (Platform.OS === 'web') {
+      console.log('Opening action menu');
       setActionMenuVisible(true);
       return;
     }
@@ -306,11 +502,11 @@ export default function ChatScreen() {
       const { ActionSheetIOS } = require('react-native');
       const options = isGroup
         ? isOwner
-          ? [muteOption, 'Удалить чат', 'Отмена']
-          : [muteOption, 'Выйти из чата', 'Отмена']
-        : [muteOption, 'Удалить чат', 'Отмена'];
+          ? [muteOption, 'Экспорт чата', 'Удалить чат', 'Отмена']
+          : [muteOption, 'Экспорт чата', 'Выйти из чата', 'Отмена']
+        : [muteOption, 'Экспорт чата', 'Удалить чат', 'Отмена'];
       
-      const destructiveIndex = isGroup && !isOwner ? 1 : 1;
+      const destructiveIndex = isGroup && !isOwner ? 2 : 2;
       const cancelIndex = options.length - 1;
       
       ActionSheetIOS.showActionSheetWithOptions(
@@ -330,6 +526,9 @@ export default function ChatScreen() {
             }).catch(() => {
               Alert.alert('Ошибка', 'Не удалось изменить настройки');
             });
+          } else if (buttonIndex === 1) {
+            // Export chat
+            handleExportChat();
           } else if (buttonIndex === destructiveIndex) {
             // Delete or leave
             if (isGroup && !isOwner) {
@@ -344,8 +543,54 @@ export default function ChatScreen() {
           }
         }
       );
+    } else if (Platform.OS === 'android') {
+      // Android: Use Alert.alert
+      const myMember = chat?.members?.find(m => m.user_id === user?.id);
+      const isMuted = myMember?.muted;
+      const isOwner = myMember?.role === 'owner';
+      
+      const muteOption = isMuted ? 'Включить уведомления' : 'Отключить уведомления';
+      
+      const options = isGroup
+        ? isOwner
+          ? [muteOption, 'Экспорт чата', 'Удалить чат']
+          : [muteOption, 'Экспорт чата', 'Выйти из чата']
+        : [muteOption, 'Экспорт чата', 'Удалить чат'];
+      
+      Alert.alert(
+        'Действия',
+        'Выберите действие',
+        options.map((opt) => ({ text: opt, onPress: () => {
+          if (opt === muteOption) {
+            const action = isMuted ? api.unmuteChat(id!) : api.muteChat(id!);
+            action.then(() => {
+              setChat(prev => prev ? {
+                ...prev,
+                members: prev.members?.map(m => 
+                  m.user_id === user?.id ? { ...m, muted: !isMuted } : m
+                )
+              } : null);
+              Alert.alert('Готово', isMuted ? 'Уведомления включены' : 'Уведомления отключены');
+            }).catch(() => {
+              Alert.alert('Ошибка', 'Не удалось изменить настройки');
+            });
+          } else if (opt === 'Экспорт чата') {
+            handleExportChat();
+          } else if (opt === 'Удалить чат' || opt === 'Выйти из чата') {
+            if (opt === 'Выйти из чата' && !isOwner) {
+              api.leaveChat(id!).then(() => router.back()).catch(() => {
+                Alert.alert('Ошибка', 'Не удалось выйти из чата');
+              });
+            } else {
+              api.deleteChat(id!).then(() => router.back()).catch(() => {
+                Alert.alert('Ошибка', 'Не удалось удалить чат');
+              });
+            }
+          }
+        }}))
+      );
     }
-  }, [isGroup, id, router, chat, user]);
+  }, [isGroup, id, router, chat, user, handleExportChat]);
 
   const onSearchPress = useCallback(() => {
     setSearchVisible(true);
@@ -382,23 +627,90 @@ export default function ChatScreen() {
     // TODO: Scroll to specific message in the future
   }, [closeSearch]);
 
+  const scrollToMessage = useCallback((messageId: string) => {
+    const index = messages.findIndex(m => m.id === messageId);
+    if (index !== -1 && listRef.current) {
+      // Use scrollToEnd instead of scrollToIndex to avoid the error
+      listRef.current?.scrollToEnd({ animated: true });
+    }
+  }, [messages]);
+
+  // Get all pinned messages
+  const pinnedMessages = useMemo(() => messages.filter(m => m.pinned), [messages]);
+
+  // Reset pinned index if out of bounds or no pinned messages
+  useEffect(() => {
+    if (pinnedMessages.length === 0) {
+      setCurrentPinnedIndex(0);
+    } else if (currentPinnedIndex >= pinnedMessages.length) {
+      setCurrentPinnedIndex(pinnedMessages.length - 1);
+    }
+  }, [pinnedMessages, currentPinnedIndex]);
+
+  // Auto-scroll to current pinned message when index changes
+  useEffect(() => {
+    if (pinnedMessages[currentPinnedIndex]) {
+      scrollToMessage(pinnedMessages[currentPinnedIndex].id);
+    }
+  }, [currentPinnedIndex, pinnedMessages, scrollToMessage]);
+
+  const nextPinnedMessage = useCallback(() => {
+    if (pinnedMessages.length === 0) return;
+    setCurrentPinnedIndex(prev => (prev + 1) % pinnedMessages.length);
+  }, [pinnedMessages.length]);
+
+  const prevPinnedMessage = useCallback(() => {
+    if (pinnedMessages.length === 0) return;
+    setCurrentPinnedIndex(prev => (prev - 1 + pinnedMessages.length) % pinnedMessages.length);
+  }, [pinnedMessages.length]);
+
   useLayoutEffect(() => {
-    const title = isGroup 
+    const title = isGroup
       ? (chat?.title || 'Групповой чат')
       : (other ? `${other.first_name} ${other.last_name}` : 'Чат');
+    
+    // Get current pinned message based on index
+    const pinnedMessage = pinnedMessages[currentPinnedIndex];
+    
     navigation.setOptions({
       headerTitle: () => (
-        <TouchableOpacity 
-          onPress={() => {
-            if (isGroup) {
-              router.push(`/chat/${id}/members`);
-            }
-          }}
-          disabled={!isGroup}
-          style={{ flexDirection: 'row', alignItems: 'center' }}>
-          <ThemedText style={{ fontSize: 17, fontWeight: '600' }}>{title}</ThemedText>
-          {isGroup && <MaterialIcons name="expand-more" size={20} color={iconColor} style={{ marginLeft: 2 }} />}
-        </TouchableOpacity>
+        <View style={{ maxWidth: '100%' }}>
+          <TouchableOpacity
+            onPress={() => {
+              if (isGroup) {
+                router.push(`/chat/${id}/members`);
+              } else if (other) {
+                router.push(`/user/${other.id}`);
+              }
+            }}>
+            <ThemedText style={[styles.headerTitle, { color: textColor }]}>
+              {title}
+            </ThemedText>
+          </TouchableOpacity>
+          {pinnedMessage && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+              <TouchableOpacity onPress={prevPinnedMessage} hitSlop={8}>
+                <MaterialIcons name="chevron-left" size={16} color={iconColor} style={{ marginRight: 4 }} />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => scrollToMessage(pinnedMessage.id)}
+                style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                <MaterialIcons name="push-pin" size={12} color={primaryColor} style={{ marginRight: 4 }} />
+                <ThemedText style={{ fontSize: 12, opacity: 0.7 }} numberOfLines={1}>
+                  {pinnedMessage.content || 'Вложение'}
+                </ThemedText>
+                {pinnedMessages.length > 1 && (
+                  <ThemedText style={{ fontSize: 12, opacity: 0.5, marginLeft: 4 }}>
+                    ({currentPinnedIndex + 1}/{pinnedMessages.length})
+                  </ThemedText>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity onPress={nextPinnedMessage} hitSlop={8}>
+                <MaterialIcons name="chevron-right" size={16} color={iconColor} style={{ marginLeft: 4 }} />
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
       ),
       headerShown: true,
       headerLeft: () => (
@@ -407,42 +719,48 @@ export default function ChatScreen() {
         </TouchableOpacity>
       ),
       headerRight: () => (
-        <View style={styles.headerRight}>
+        <View style={[styles.headerRight, { zIndex: 10 }]} pointerEvents="box-none">
           <TouchableOpacity onPress={onSearchPress} style={styles.headerIconButton} hitSlop={8}>
             <MaterialIcons name="search" size={24} color={primaryColor} />
           </TouchableOpacity>
-          <TouchableOpacity 
+          <TouchableOpacity
             onPress={() => {
               setCallType('video');
               setCallModalVisible(true);
-            }} 
-            style={styles.headerIconButton} 
+            }}
+            style={styles.headerIconButton}
             hitSlop={8}>
             <MaterialIcons name="videocam" size={24} color={primaryColor} />
           </TouchableOpacity>
-          <TouchableOpacity 
+          <TouchableOpacity
             onPress={() => {
               setCallType('audio');
               setCallModalVisible(true);
-            }} 
-            style={styles.headerIconButton} 
+            }}
+            style={styles.headerIconButton}
             hitSlop={8}>
             <MaterialIcons name="call" size={24} color={primaryColor} />
           </TouchableOpacity>
-          <TouchableOpacity 
-            onPress={() => {
-              console.log('More button pressed');
-              onMorePress();
-            }} 
-            style={styles.headerIconButton} 
-            hitSlop={{ top: 15, bottom: 15, left: 15, right: 15 }}
-            activeOpacity={0.6}>
+          {isGroup && (
+            <TouchableOpacity
+              onPress={() => {
+                router.push(`/chat/${id}/members`);
+              }}
+              style={styles.headerIconButton}
+              hitSlop={8}>
+              <MaterialIcons name="group" size={24} color={primaryColor} />
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            onPress={onMorePress}
+            style={styles.headerIconButton}
+            hitSlop={8}>
             <MaterialIcons name="more-vert" size={24} color={primaryColor} />
           </TouchableOpacity>
         </View>
       ),
     });
-  }, [navigation, other, chat, isGroup, router, primaryColor, onMorePress]);
+  }, [navigation, isGroup, chat, other, iconColor, primaryColor, pinnedMessages, currentPinnedIndex, scrollToMessage, nextPinnedMessage, prevPinnedMessage, onSearchPress]);
 
   // Fetch chat info (wait for token)
   useEffect(() => {
@@ -467,33 +785,7 @@ export default function ChatScreen() {
 
   // Fetch messages (wait for token)
   useEffect(() => {
-    if (!id || !token) return;
-    console.log('[Chat] Loading messages for:', id);
-    api.getChatMessages(id, 50).then(async res => {
-      console.log('[Chat] Messages loaded:', res.data?.length, 'error:', res.error?.message);
-      if (res.data) {
-        // Load reactions for each message
-        const messagesWithReactions = await Promise.all(
-          res.data.map(async (msg) => {
-            try {
-              const reactionsRes = await api.getMessageReactions(msg.id);
-              console.log('[Chat] Loaded reactions for message', msg.id, ':', reactionsRes.data?.length || 0);
-              return {
-                ...msg,
-                reactions: reactionsRes.data || [],
-              };
-            } catch (error) {
-              console.error('[Chat] Failed to load reactions for message:', msg.id, error);
-              return msg;
-            }
-          })
-        );
-        console.log('[Chat] Messages with reactions loaded:', messagesWithReactions.length);
-        setMessages(messagesWithReactions);
-      } else if (res.error) {
-        console.error('[Chat] Failed to load messages:', res.error);
-      }
-    }).catch(err => console.error('[Chat] Exception loading messages:', err));
+    loadMessages();
   }, [id, token]);
 
   // WebSocket connection
@@ -539,6 +831,8 @@ export default function ChatScreen() {
           content: data.payload.content,
           created_at: data.payload.created_at,
           updated_at: data.payload.updated_at || data.payload.created_at,
+          reply_to_content: data.payload.reply_to_content,
+          reply_to_sender_name: data.payload.reply_to_sender_name,
         };
         setMessages(prev => [...prev, newMessage]);
         // Auto-scroll to bottom when new message arrives
@@ -668,12 +962,12 @@ export default function ChatScreen() {
   const sendMessage = useCallback(async () => {
     const trimmed = input.trim();
     const hasFile = selectedFile !== null;
-    
+
     if ((!trimmed && !hasFile) || !id || !user) return;
-    
+
     // Stop typing indicator
     wsService.sendTyping(id, false, user.first_name, user.last_name);
-    
+
     setInput('');
     const tempId = `temp-${Date.now()}`;
     const optimistic: Message = {
@@ -684,17 +978,18 @@ export default function ChatScreen() {
       content: trimmed || '[Файл]',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      reply_to: replyingTo?.id,
     };
     setMessages(prev => [...prev, optimistic]);
-    
+
     // Auto-scroll to bottom when sending message
     setTimeout(() => {
       listRef.current?.scrollToEnd({ animated: true });
     }, 100);
-    
+
     try {
       // Send message first
-      const res = await api.sendMessage(id, trimmed || '[Файл]');
+      const res = await api.sendMessage(id, trimmed || '[Файл]', hasFile ? 'file' : 'text', replyingTo?.id);
       if (!res.data) {
         throw new Error('Failed to send message');
       }
@@ -729,15 +1024,16 @@ export default function ChatScreen() {
           listRef.current?.scrollToEnd({ animated: true });
         }, 100);
       }
-      
-      // Clear selected file
+
+      // Clear selected file and reply state
       setSelectedFile(null);
+      setReplyingTo(null);
     } catch (e) {
       console.error('Send message error:', e);
       setMessages(prev => prev.filter(m => m.id !== tempId));
       Alert.alert('Ошибка', 'Не удалось отправить сообщение');
     }
-  }, [id, user, input, selectedFile]);
+  }, [id, user, input, selectedFile, replyingTo]);
 
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!id) return;
@@ -745,68 +1041,10 @@ export default function ChatScreen() {
       await api.deleteMessage(id, messageId);
       setMessages(prev => prev.filter(m => m.id !== messageId));
     } catch (e) {
-      console.error('Delete message error:', e);
-      Alert.alert('Ошибка', 'Не удалось удалить сообщение');
-    }
-  }, [id]);
-
-  const handleMessageLongPress = useCallback((msg: Message) => {
-    const isOwn = msg.sender_id === user?.id;
-    // In direct chats, any member can delete any message
-    // In group chats, only owner/admin can delete others' messages
-    const canDelete = isOwn || !isGroup || userRole === 'owner' || userRole === 'admin';
-    const canEdit = isOwn; // Only own messages can be edited
-
-    console.log('Menu button pressed:', { senderId: msg.sender_id, userId: user?.id, isOwn, isGroup, userRole, canDelete, canEdit });
-
-    if (!canDelete && !canEdit) {
       console.log('No permissions for message actions');
       return;
     }
-
-    const options = [];
-    if (canEdit) options.push('Редактировать');
-    if (canDelete) options.push('Удалить');
-    options.push('Отмена');
-    
-    const editIndex = canEdit ? 0 : -1;
-    const deleteIndex = canEdit ? 1 : 0;
-    const cancelIndex = options.length - 1;
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options,
-          destructiveButtonIndex: canDelete ? deleteIndex : undefined,
-          cancelButtonIndex: cancelIndex,
-        },
-        (buttonIndex) => {
-          if (canEdit && buttonIndex === editIndex) {
-            setEditingMessage(msg);
-            setEditText(msg.content);
-            setEditModalVisible(true);
-          } else if (canDelete && buttonIndex === deleteIndex) {
-            deleteMessage(msg.id);
-          }
-        }
-      );
-    } else {
-      const alertButtons: Array<{
-        text: string;
-        style?: 'default' | 'cancel' | 'destructive';
-        onPress?: () => void;
-      }> = [];
-      if (canEdit) alertButtons.push({ text: 'Редактировать', onPress: () => {
-        setEditingMessage(msg);
-        setEditText(msg.content);
-        setEditModalVisible(true);
-      }});
-      if (canDelete) alertButtons.push({ text: 'Удалить', style: 'destructive', onPress: () => deleteMessage(msg.id) });
-      alertButtons.push({ text: 'Отмена', style: 'cancel' });
-      
-      Alert.alert('Действия', undefined, alertButtons as any);
-    }
-  }, [user, userRole, deleteMessage, isGroup]);
+  }, [id]);
 
   const saveEdit = async () => {
     if (!editingMessage || !id || !editText.trim()) return;
@@ -877,7 +1115,17 @@ export default function ChatScreen() {
     const canDeleteMessage = isOwn || !isGroup || userRole === 'owner' || userRole === 'admin';
     
     // Debug logging
-    console.log('Message render:', { msgId: msg.id, isOwn, isGroup, userRole, canDeleteMessage, senderId: msg.sender_id, userId: user?.id });
+    console.log('Message render:', { 
+      msgId: msg.id, 
+      isOwn, 
+      isGroup, 
+      userRole, 
+      canDeleteMessage, 
+      senderId: msg.sender_id, 
+      userId: user?.id,
+      forwarded_from: msg.forwarded_from,
+      forwarded_sender_name: msg.forwarded_sender_name,
+    });
     
     const handleContextMenu = (e: any) => {
       e.preventDefault();
@@ -920,7 +1168,7 @@ export default function ChatScreen() {
 
     const bubbleContent = (
       <Pressable
-        onLongPress={() => handleMessageLongPress(msg)}
+        onLongPress={() => handleMessageMenuPress(msg)}
         {...contextMenuProps}
         style={({ pressed }) => [
           styles.bubble,
@@ -939,17 +1187,47 @@ export default function ChatScreen() {
             <MaterialIcons name="open-in-new" size={18} color={textColor} style={{ opacity: 0.7 }} />
           </TouchableOpacity>
         )}
+        {/* Forwarded from indicator - prominent bubble */}
+        {msg.forwarded_sender_name && (
+          <View style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
+            <MaterialIcons name="forward" size={16} color={textColor} style={{ opacity: 0.8 }} />
+            <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
+              Переслано от {msg.forwarded_sender_name}
+            </ThemedText>
+          </View>
+        )}
+        {/* Reply indicator - prominent bubble */}
+        {msg.reply_to_content && (
+          <View style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
+            <MaterialIcons name="reply" size={16} color={textColor} style={{ opacity: 0.8 }} />
+            <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
+              Ответ: {msg.reply_to_content.length > 50 ? msg.reply_to_content.substring(0, 50) + '...' : msg.reply_to_content}
+            </ThemedText>
+          </View>
+        )}
+        {/* Debug: check if message has forwarded fields */}
+        {msg.forwarded_from && !msg.forwarded_sender_name && (
+          <View style={[styles.forwardedBubble, { backgroundColor: 'rgba(255,0,0,0.1)', borderColor: 'red', borderWidth: 1 }]}>
+            <MaterialIcons name="forward" size={16} color="red" />
+            <ThemedText style={[styles.forwardedBubbleText, { color: 'red' }]}>
+              Переслано (без имени)
+            </ThemedText>
+          </View>
+        )}
         <ThemedText style={[styles.bubbleText, { color: textColor }]}>
           {msg.content}
         </ThemedText>
-        
+
         {/* Reactions */}
         <MessageReactions
           reactions={msg.reactions || []}
           compact={false}
         />
-        
+
         <View style={styles.timeRow}>
+          {msg.pinned && (
+            <MaterialIcons name="push-pin" size={14} color={primaryColor} style={{ marginRight: 4 }} />
+          )}
           <ThemedText style={[styles.time, { color: textColor, opacity: 0.7 }]}>
             {dayjs(msg.created_at).format('HH:mm')}
           </ThemedText>
@@ -981,7 +1259,7 @@ export default function ChatScreen() {
           if (Platform.OS === 'web') {
             handleMessageMenuPress(msg);
           } else {
-            handleMessageLongPress(msg);
+            handleMessageMenuPress(msg);
           }
         }}
         style={styles.messageMenuButton}
@@ -1036,7 +1314,7 @@ export default function ChatScreen() {
         {wrappedContent}
       </View>
     );
-  }, [user, membersMap, isGroup, messageOutgoing, messageIncoming, textColor, iconColor, handleMessageLongPress, primaryColor, userRole]);
+  }, [user, membersMap, isGroup, messageOutgoing, messageIncoming, textColor, iconColor, handleMessageMenuPress, primaryColor, userRole]);
 
   // Show loading state
   if (loading) {
@@ -1078,6 +1356,12 @@ export default function ChatScreen() {
           extraData={messages}
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
           onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
+          onScrollToIndexFailed={(info) => {
+            const wait = new Promise(resolve => setTimeout(resolve, 500));
+            wait.then(() => {
+              listRef.current?.scrollToIndex({ index: info.index, animated: true });
+            });
+          }}
           contentContainerStyle={[styles.list, { paddingTop: insets.bottom + 60 }]}
         />
         {selectedFile && (
@@ -1110,7 +1394,7 @@ export default function ChatScreen() {
         {typingUsers.size > 0 && (
           <View style={[styles.typingContainerBottom, { backgroundColor: surfaceColor }]}>
             <ThemedText style={[styles.typingText, { color: iconColor }]}>
-              {typingUsers.size === 1 
+              {typingUsers.size === 1
                 ? `${getSenderInfo(Array.from(typingUsers)[0])?.first_name || 'Кто-то'} печатает...`
                 : `${typingUsers.size} человек печатают...`
               }
@@ -1120,6 +1404,20 @@ export default function ChatScreen() {
               <View style={[styles.dot, { backgroundColor: iconColor }, styles.dot2]} />
               <View style={[styles.dot, { backgroundColor: iconColor }, styles.dot3]} />
             </View>
+          </View>
+        )}
+        {/* Reply Preview */}
+        {replyingTo && (
+          <View style={[styles.replyPreview, { backgroundColor: surfaceColor, borderTopColor: borderColor }]}>
+            <View style={styles.replyPreviewContent}>
+              <MaterialIcons name="reply" size={16} color={iconColor} />
+              <ThemedText style={[styles.replyPreviewText, { color: iconColor }]}>
+                Ответ на {getSenderInfo(replyingTo.sender_id)?.first_name || 'пользователя'}
+              </ThemedText>
+            </View>
+            <TouchableOpacity onPress={() => setReplyingTo(null)}>
+              <MaterialIcons name="close" size={20} color={iconColor} />
+            </TouchableOpacity>
           </View>
         )}
         <View style={[styles.inputRow, { paddingBottom: insets.bottom + 12, backgroundColor: surfaceColor }]}>
@@ -1278,6 +1576,19 @@ export default function ChatScreen() {
                       </ThemedText>
                     </TouchableOpacity>
                     
+                    <TouchableOpacity 
+                      style={styles.actionMenuItem}
+                      onPress={() => {
+                        console.log('[Chat] Export button in action menu pressed');
+                        setActionMenuVisible(false);
+                        handleExportChat();
+                      }}>
+                      <MaterialIcons name="download" size={20} color={iconColor} />
+                      <ThemedText style={styles.actionMenuText}>
+                        Экспорт чата
+                      </ThemedText>
+                    </TouchableOpacity>
+                    
                     <View style={[styles.actionMenuDivider, { backgroundColor: borderColor }]} />
                     
                     {isGroup && !isOwner ? (
@@ -1327,7 +1638,7 @@ export default function ChatScreen() {
         onClose={() => setCallModalVisible(false)}
         chatId={id!}
         calleeId={other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || ''}
-        calleeName={other ? `${other.first_name} ${other.last_name}` : 'Пользователь'}
+        calleeName={isGroup ? (chat?.title || 'Групповой звонок') : (other ? `${other.first_name} ${other.last_name}` : 'Пользователь')}
         callType={callType}
       />
 
@@ -1346,31 +1657,28 @@ export default function ChatScreen() {
           setEditText(content);
           setEditModalVisible(true);
         }}
-        onPin={async (messageId: string) => {
-          try {
-            await api.pinMessage(id || '', messageId);
-            Alert.alert('Успешно', 'Сообщение закреплено');
-          } catch (error) {
-            Alert.alert('Ошибка', 'Не удалось закрепить сообщение');
-          }
+        onPin={(messageId: string) => {
+          // Update message pinned status locally
+          setMessages(prev => prev.map(m =>
+            m.id === messageId ? { ...m, pinned: true } : m
+          ));
         }}
-        onUnpin={async (messageId: string) => {
-          try {
-            await api.unpinMessage(id || '', messageId);
-            Alert.alert('Успешно', 'Сообщение откреплено');
-          } catch (error) {
-            Alert.alert('Ошибка', 'Не удалось открепить сообщение');
-          }
+        onUnpin={(messageId: string) => {
+          // Update message pinned status locally
+          setMessages(prev => prev.map(m =>
+            m.id === messageId ? { ...m, pinned: false } : m
+          ));
         }}
-        onForward={async (messageId: string) => {
-          try {
-            await api.forwardMessage(id || '', messageId);
-            Alert.alert('Успешно', 'Сообщение готово для пересылки');
-          } catch (error) {
-            Alert.alert('Ошибка', 'Не удалось переслать сообщение');
+        onForward={handleForward}
+        onReply={(messageId: string) => {
+          const message = messages.find(m => m.id === messageId);
+          if (message) {
+            setReplyingTo(message);
+            setInput('');
           }
         }}
         messageContent={selectedMessage?.content}
+        isPinned={selectedMessage?.pinned || false}
       />
 
       {/* Image Preview Modal */}
@@ -1379,6 +1687,63 @@ export default function ChatScreen() {
         onClose={() => setImagePreviewVisible(false)}
         imageUrl={previewImageUrl}
       />
+
+      {/* Forward Chat Selection Modal */}
+      <Modal visible={forwardModalVisible} transparent animationType="slide">
+        <View style={styles.forwardOverlay}>
+          <View style={[styles.forwardContainer, { backgroundColor: surfaceColor }]}>
+            <ThemedText style={styles.forwardTitle}>Переслать сообщение</ThemedText>
+            <View style={styles.forwardChatList}>
+              {userChats.map((chat) => {
+                // For direct chats, show the other user's name
+                const isDirect = chat.type === 'direct';
+                let chatName = chat.title || chat.name || 'Чат';
+                
+                if (isDirect && chat.members && chat.members.length > 0) {
+                  const otherMember = chat.members.find((m: any) => m.user_id !== user?.id);
+                  if (otherMember && otherMember.user) {
+                    chatName = `${otherMember.user.first_name} ${otherMember.user.last_name}`;
+                  }
+                }
+                
+                return (
+                  <TouchableOpacity
+                    key={chat.id}
+                    style={styles.forwardChatItem}
+                    onPress={async () => {
+                      try {
+                        await api.forwardMessage(chat.id, forwardingMessageId || '');
+                        Alert.alert('Успешно', 'Сообщение переслано');
+                        setForwardModalVisible(false);
+                        setForwardingMessageId(null);
+                        // Navigate to the target chat
+                        router.push(`/chat/${chat.id}`);
+                      } catch (error) {
+                        console.error('Failed to forward message:', error);
+                        Alert.alert('Ошибка', 'Не удалось переслать сообщение');
+                      }
+                    }}
+                  >
+                    <ThemedText style={styles.forwardChatName}>{chatName}</ThemedText>
+                  </TouchableOpacity>
+                );
+              })}
+              {userChats.length === 0 && (
+                <ThemedText style={styles.forwardEmpty}>Нет других чатов</ThemedText>
+              )}
+            </View>
+            <TouchableOpacity
+              style={styles.forwardCancelButton}
+              onPress={() => {
+                setForwardModalVisible(false);
+                setForwardingMessageId(null);
+              }}
+            >
+              <ThemedText style={[styles.forwardCancelText, { color: '#dc3545' }]}>Отмена</ThemedText>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
@@ -1411,6 +1776,46 @@ const styles = StyleSheet.create({
   bubbleText: {
     fontSize: 16,
     lineHeight: 22,
+  },
+  forwardedIndicator: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+    gap: 4,
+  },
+  forwardedText: {
+    fontSize: 11,
+    fontStyle: 'italic',
+  },
+  forwardedBubble: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    marginBottom: 6,
+    gap: 6,
+  },
+  forwardedBubbleText: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  replyPreview: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+  },
+  replyPreviewContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  replyPreviewText: {
+    fontSize: 12,
   },
   timeRow: {
     flexDirection: 'row',
@@ -1461,14 +1866,32 @@ const styles = StyleSheet.create({
   },
   sendButton: { borderRadius: 22, width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   headerBackButton: { paddingHorizontal: 12, paddingVertical: 8, justifyContent: 'center' },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 4, zIndex: 1 },
-  headerIconButton: { paddingHorizontal: 8, paddingVertical: 8, justifyContent: 'center' },
-  // Status and unread styles
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8, zIndex: 1 },
+  headerIconButton: { minWidth: 44, minHeight: 44, paddingHorizontal: 8, paddingVertical: 8, justifyContent: 'center', alignItems: 'center' },
+  headerTitle: { fontSize: 16, fontWeight: '600' },
   doubleCheck: { width: 22, height: 14, marginLeft: 2 },
   unreadDivider: { flexDirection: 'row', alignItems: 'center', marginVertical: 16, paddingHorizontal: 16 },
   unreadLine: { flex: 1, height: 1 },
   unreadText: { fontSize: 12, marginHorizontal: 12, fontWeight: '500' },
-  // Modal styles
+  selectedFilePreview: { width: 40, height: 40, borderRadius: 8 },
+  selectedFileName: { flex: 1, fontSize: 14 },
+  removeFileButton: { padding: 8 },
+  searchOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  searchContainer: { width: '90%', maxHeight: '80%', borderRadius: 12, padding: 20 },
+  searchInput: { borderWidth: 1, borderRadius: 8, padding: 12, fontSize: 16, marginBottom: 12 },
+  searchList: { maxHeight: 400 },
+  searchItem: { paddingVertical: 12, borderBottomWidth: 1 },
+  searchItemText: { fontSize: 14 },
+  searchEmpty: { textAlign: 'center', fontSize: 14, marginTop: 20 },
+  forwardOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
+  forwardContainer: { width: '90%', maxHeight: '80%', borderRadius: 12, padding: 20 },
+  forwardTitle: { fontSize: 18, fontWeight: '600', marginBottom: 16 },
+  forwardChatList: { maxHeight: 400 },
+  forwardChatItem: { paddingVertical: 12, borderBottomWidth: 1 },
+  forwardChatName: { fontSize: 16 },
+  forwardEmpty: { textAlign: 'center', fontSize: 14, marginTop: 20 },
+  forwardCancelButton: { marginTop: 16, paddingVertical: 12, alignItems: 'center' },
+  forwardCancelText: { fontSize: 16 },
   modalOverlay: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   modalContent: { width: '85%', borderRadius: 12, padding: 20 },
   modalTitle: { fontSize: 18, fontWeight: '600', marginBottom: 16 },
@@ -1478,15 +1901,13 @@ const styles = StyleSheet.create({
   modalButtonPrimary: { backgroundColor: '#007AFF', borderRadius: 8 },
   attachButton: { padding: 8, justifyContent: 'center', alignItems: 'center' },
   selectedFileRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
-  selectedFilePreview: { width: 40, height: 40, borderRadius: 8 },
-  selectedFileName: { flex: 1, fontSize: 14 },
   fileAttachment: { flexDirection: 'row', alignItems: 'center', padding: 8, borderRadius: 8, marginBottom: 6, gap: 8 },
   fileName: { flex: 1, fontSize: 14 },
   messageMenuButton: {
     padding: 4,
     justifyContent: 'center',
     alignItems: 'center',
-    alignSelf: 'flex-end',
+    alignSelf: 'flex-start',
     marginBottom: 4,
   },
   threeDotsButton: {
@@ -1512,7 +1933,6 @@ const styles = StyleSheet.create({
   // Search styles
   searchHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
   searchCloseButton: { padding: 8, marginRight: 8 },
-  searchInput: { flex: 1, fontSize: 16, paddingVertical: 8 },
   searchButton: { padding: 8, marginLeft: 8 },
   searchResultsList: { paddingHorizontal: 16 },
   searchResultItem: { paddingVertical: 12, borderBottomWidth: 1 },
@@ -1520,5 +1940,5 @@ const styles = StyleSheet.create({
   searchResultSender: { fontSize: 14, fontWeight: '600' },
   searchResultTime: { fontSize: 12, opacity: 0.7 },
   searchResultText: { fontSize: 15 },
-  searchEmpty: { paddingVertical: 48, alignItems: 'center' },
+  searchResultsEmpty: { paddingVertical: 48, alignItems: 'center' },
 });

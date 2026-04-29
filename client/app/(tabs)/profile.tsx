@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import { ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MaterialIcons } from '@expo/vector-icons';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -81,6 +82,25 @@ export default function ProfileScreen() {
               })}
             </View>
           </View>
+          
+          <TouchableOpacity
+            style={[styles.menuItem, { backgroundColor: useThemeColor({}, 'surface'), borderColor: useThemeColor({}, 'border') }]}
+            onPress={() => router.push('/notification-settings')}
+            activeOpacity={0.8}>
+            <MaterialIcons name="notifications" size={24} color={textColor} />
+            <ThemedText style={[styles.menuItemText, { color: textColor }]}>Уведомления</ThemedText>
+            <MaterialIcons name="chevron-right" size={24} color={textColor + '60'} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.menuItem, { backgroundColor: useThemeColor({}, 'surface'), borderColor: useThemeColor({}, 'border') }]}
+            onPress={() => router.push('/messaging-settings')}
+            activeOpacity={0.8}>
+            <MaterialIcons name="settings-ethernet" size={24} color={textColor} />
+            <ThemedText style={[styles.menuItemText, { color: textColor }]}>Настройки сообщений</ThemedText>
+            <MaterialIcons name="chevron-right" size={24} color={textColor + '60'} />
+          </TouchableOpacity>
+
           <TouchableOpacity
             style={[styles.logoutButton, { borderColor: tintColor }]}
             onPress={handleLogout}
@@ -122,6 +142,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   themeOptionText: { fontSize: 15, fontWeight: '500' },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+    borderRadius: 12,
+    marginTop: 12,
+    borderWidth: 1,
+  },
+  menuItemText: {
+    fontSize: 16,
+    marginLeft: 12,
+    flex: 1,
+  },
   logoutButton: { borderWidth: 2, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 24 },
   logoutText: { fontSize: 16, fontWeight: '600' },
 });

@@ -13,6 +13,7 @@ import (
 type Config struct {
 	AppEnv               string
 	HTTPPort             int
+	HTTPSPort            int
 	LogLevel             string
 	DBDSN                string
 	JWTSecret            string
@@ -26,6 +27,24 @@ type Config struct {
 	RateLimitRequests    int
 	RateLimitWindow      int
 	MaxRateLimitEntries  int
+	HybridMode           bool
+	XMPPSyncEnabled      bool
+	SchedulerEnabled     bool
+	SMTPHost             string
+	SMTPPort             int
+	SMTPUser             string
+	SMTPPassword         string
+	SMTPFrom             string
+	TURNServerURI        string
+	TURNUsername         string
+	TURNPassword         string
+	TLSEnabled           bool
+	TLSCertPath          string
+	TLSKeyPath           string
+	DBSSLMode            string
+	LiveKitURL           string
+	LiveKitAPIKey        string
+	LiveKitAPISecret     string
 }
 
 func Load() (Config, error) {
@@ -38,10 +57,23 @@ func Load() (Config, error) {
 	if cfg.HTTPPort, err = requiredInt("HTTP_PORT"); err != nil {
 		return Config{}, err
 	}
+	// HTTPS_PORT is optional - only required when TLS is enabled
+	if value := optional("HTTPS_PORT"); value != "" {
+		port, convErr := strconv.Atoi(value)
+		if convErr != nil {
+			return Config{}, fmt.Errorf("env HTTPS_PORT must be a valid integer")
+		}
+		cfg.HTTPSPort = port
+	} else {
+		cfg.HTTPSPort = 8443 // Default HTTPS port
+	}
 	if cfg.LogLevel, err = required("LOG_LEVEL"); err != nil {
 		return Config{}, err
 	}
-	cfg.DBDSN = optional("DB_DSN")
+	cfg.DBDSN = optional("DATABASE_URL")
+	if cfg.DBDSN == "" {
+		cfg.DBDSN = optional("DB_DSN")
+	}
 	if cfg.JWTSecret, err = required("JWT_SECRET"); err != nil {
 		return Config{}, err
 	}
@@ -73,15 +105,15 @@ func Load() (Config, error) {
 			"http://localhost:8081",
 		}
 	}
-	// Parse session duration (default 168 hours = 7 days)
-	if hours := optional("SESSION_DURATION_HOURS"); hours != "" {
-		h, err := strconv.Atoi(hours)
-		if err != nil || h < 1 || h > 720 {
-			return Config{}, fmt.Errorf("env SESSION_DURATION_HOURS must be between 1 and 720")
+	// Parse session duration (default 24 hours for better security)
+	if h := optional("SESSION_DURATION_HOURS"); h != "" {
+		hours, err := strconv.Atoi(h)
+		if err != nil {
+			return Config{}, fmt.Errorf("env SESSION_DURATION_HOURS must be an integer")
 		}
-		cfg.SessionDurationHours = h
+		cfg.SessionDurationHours = hours
 	} else {
-		cfg.SessionDurationHours = 168 // Default 7 days
+		cfg.SessionDurationHours = 24 // Default 24 hours for better security
 	}
 
 	// Parse rate limit configuration
@@ -115,6 +147,67 @@ func Load() (Config, error) {
 		cfg.MaxRateLimitEntries = 10000 // Default 10000 entries
 	}
 
+	// Parse hybrid mode configuration
+	if hybrid := optional("HYBRID_MODE"); hybrid != "" {
+		cfg.HybridMode = strings.ToLower(hybrid) == "true"
+	} else {
+		cfg.HybridMode = false // Default to WebSocket only
+	}
+
+	// Parse XMPP sync configuration
+	if sync := optional("XMPP_SYNC_ENABLED"); sync != "" {
+		cfg.XMPPSyncEnabled = strings.ToLower(sync) == "true"
+	} else {
+		cfg.XMPPSyncEnabled = cfg.HybridMode // Enable sync by default in hybrid mode
+	}
+
+	// Parse scheduler configuration
+	if sched := optional("SCHEDULER_ENABLED"); sched != "" {
+		cfg.SchedulerEnabled = strings.ToLower(sched) == "true"
+	} else {
+		cfg.SchedulerEnabled = true // Enable scheduler by default
+	}
+
+	// Parse SMTP configuration
+	cfg.SMTPHost = optional("SMTP_HOST")
+	if port := optional("SMTP_PORT"); port != "" {
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 {
+			return Config{}, fmt.Errorf("env SMTP_PORT must be between 1 and 65535")
+		}
+		cfg.SMTPPort = p
+	} else {
+		cfg.SMTPPort = 587 // Default SMTP port
+	}
+	cfg.SMTPUser = optional("SMTP_USER")
+	cfg.SMTPPassword = optional("SMTP_PASSWORD")
+	cfg.SMTPFrom = optional("SMTP_FROM")
+
+	// Parse TURN server configuration for WebRTC
+	cfg.TURNServerURI = optional("TURN_SERVER_URI")
+	cfg.TURNUsername = optional("TURN_USERNAME")
+	cfg.TURNPassword = optional("TURN_PASSWORD")
+
+	// Parse TLS configuration
+	if tlsEnabled := optional("TLS_ENABLED"); tlsEnabled != "" {
+		cfg.TLSEnabled = strings.ToLower(tlsEnabled) == "true"
+	} else {
+		cfg.TLSEnabled = false // Default to HTTP
+	}
+	cfg.TLSCertPath = optional("TLS_CERT_PATH")
+	cfg.TLSKeyPath = optional("TLS_KEY_PATH")
+
+	// Parse DB SSL mode
+	cfg.DBSSLMode = optional("DB_SSL_MODE")
+	if cfg.DBSSLMode == "" {
+		cfg.DBSSLMode = "disable" // Default to disable SSL for local development
+	}
+
+	// Parse LiveKit configuration
+	cfg.LiveKitURL = optional("LIVEKIT_URL")
+	cfg.LiveKitAPIKey = optional("LIVEKIT_API_KEY")
+	cfg.LiveKitAPISecret = optional("LIVEKIT_API_SECRET")
+
 	return cfg, nil
 }
 
@@ -128,7 +221,7 @@ func (c Config) Validate() error {
 	if !contains([]string{"debug", "info", "warn", "error"}, c.LogLevel) {
 		return fmt.Errorf("env LOG_LEVEL must be one of: debug, info, warn, error")
 	}
-	if c.EjabberdPort < 0 || c.EjabberdPort > 65535 {
+	if c.EjabberdPort < 1 || c.EjabberdPort > 65535 {
 		return fmt.Errorf("env EJABBERD_PORT must be between 1 and 65535 when provided")
 	}
 	return nil

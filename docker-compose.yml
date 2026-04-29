@@ -3,50 +3,99 @@ services:
     image: postgres:16-alpine
     container_name: corp-postgres
     environment:
-      POSTGRES_DB: corp_messenger
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: corpmessenger
+      POSTGRES_USER: corpmessenger
+      POSTGRES_PASSWORD: corpmessenger_password
     ports:
       - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U corpmessenger"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: corp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: corp-livekit
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    environment:
+      LIVEKIT_KEYS: "devsecret: devsecret123456789012345678901234567890"
+      LIVEKIT_REDIS_ADDRESS: "redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
 
   ejabberd:
-    image: ejabberd/ecs:latest
+    image: ejabberd/ecs:24.07
     container_name: corp-ejabberd
-    environment:
-      - EJABBERD_DOMAIN=localhost
-      - EJABBERD_ADMINS=admin@localhost
-      - EJABBERD_USERS=admin@localhost:admin
     ports:
-      - "5222:5222"    # XMPP client
-      - "5269:5269"    # XMPP server-to-server
-      - "5280:5280"    # HTTP admin API
-      - "5443:5443"    # HTTP websockets
+      - "5222:5222"
+      - "5269:5269"
+      - "5280:5280"
     volumes:
-      - ejabberd_data:/home/ejabberd
+      - ./backend/ejabberd:/home/kong/ejabberd/conf
+      - ./data/ejabberd:/home/kong/ejabberd/database
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        GOPROXY: https://proxy.golang.org,direct
     container_name: corp-backend
-    depends_on:
-      - postgres
-      - ejabberd
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    ports:
+      - "8080:8080"
+      - "8443:8443"
     environment:
       APP_ENV: local
       HTTP_PORT: 8080
+      HTTPS_PORT: 8443
       LOG_LEVEL: debug
-      DB_DSN: postgres://postgres:postgres@postgres:5432/corp_messenger?sslmode=disable
+      DATABASE_URL: postgres://corpmessenger:corpmessenger_password@postgres:5432/corpmessenger?sslmode=disable
       JWT_SECRET: your-secret-key-change-in-production
-      XMPP_HOST: ejabberd
-      XMPP_PORT: 5222
-      BASE_URL: http://localhost:8080
-    ports:
-      - "8080:8080"
+      EJABBERD_HOST: localhost
+      EJABBERD_PORT: 5222
+      EJABBERD_USERNAME: admin
+      EJABBERD_PASSWORD: admin123
+      EJABBERD_ADMIN_USER: admin@localhost
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: devsecret
+      LIVEKIT_API_SECRET: APISecret
+      ENCRYPTION_MASTER_KEY: N5yZV8oRu8nGKg9qCY5FT24toZI9Z9Ps0lzXFb//eAM=
+      CORS_ORIGINS: http://localhost:3000,http://localhost:19006,http://localhost:8081
+      ENABLE_HTTPS: "false"
+      SCHEDULER_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ejabberd:
+        condition: service_started
+      livekit:
+        condition: service_started
     volumes:
-      - uploads_data:/app/uploads
-
-volumes:
-  ejabberd_data:
-  postgres_data:
-  uploads_data:
+      - ./backend/uploads:/app/uploads
+      - ./data/uploads:/app/uploads

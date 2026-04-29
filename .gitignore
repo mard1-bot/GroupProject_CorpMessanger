@@ -1,0 +1,72 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+/backend/api
+/backend/main
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Secrets directory
+.secrets/
+
+# Data directories
+/data/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Node modules
+client/node_modules/
+client/.expo/
+
+# Temporary files
+tmp/
+temp/
+
+# Certificates
+*.pem
+*.key
+*.crt
+certs/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker
+.dockerignore
+
+# Coverage reports
+coverage.out
+*.cover
+
+# Test files
+*.test
+
+# Backup files
+*.bak
+*.backup
+
+# Lock files
+*.lock

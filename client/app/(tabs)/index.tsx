@@ -10,6 +10,7 @@ import { ThemedView } from '@/components/themed-view';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useAuth } from '@/contexts/auth-context';
 import { api } from '@/services/api';
+import { wsService, WS_EVENTS } from '@/services/websocket';
 import type { Chat } from '@/types/chat';
 
 export default function ChatsScreen() {
@@ -29,6 +30,40 @@ export default function ChatsScreen() {
     if (!isAuthLoading) {
       loadChats();
     }
+  }, [isAuthLoading]);
+
+  // WebSocket connection and event handling
+  useEffect(() => {
+    const token = localStorage.getItem('@auth_token');
+    if (token) {
+      wsService.setToken(token);
+      wsService.connect();
+    }
+
+    const unsubscribe = wsService.onMessage((message) => {
+      console.log('[Chats] WebSocket message:', message.type, message.chat_id);
+
+      if (message.type === WS_EVENTS.CHAT_CREATED) {
+        const newChat = message.payload.chat as Chat;
+        setChats(prev => {
+          const exists = prev.some(c => c.id === newChat.id);
+          if (!exists) {
+            return [newChat, ...prev];
+          }
+          return prev;
+        });
+      } else if (message.type === WS_EVENTS.CHAT_DELETED) {
+        const deletedChatId = message.payload.chat_id as string;
+        setChats(prev => prev.filter(c => c.id !== deletedChatId));
+      } else if (message.type === WS_EVENTS.NEW_MESSAGE) {
+        // Reload chats to get updated preview and move chat to top
+        loadChats();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, [isAuthLoading]);
 
   const loadChats = async () => {

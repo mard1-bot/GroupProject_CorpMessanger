@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/mail"
 	"strings"
@@ -21,6 +22,47 @@ import (
 func isValidEmail(email string) bool {
 	addr, err := mail.ParseAddress(email)
 	return err == nil && addr.Address == email
+}
+
+// validatePassword checks password strength requirements
+func validatePassword(password string) error {
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters long")
+	}
+
+	// Check for common passwords (top 100 most common)
+	commonPasswords := map[string]bool{
+		"password": true, "123456": true, "12345678": true, "qwerty": true,
+		"abc123": true, "password123": true, "admin": true, "welcome": true,
+		"monkey": true, "letmein": true, "dragon": true, "master": true,
+		"hello": true, "login": true, "football": true, "iloveyou": true,
+		"princess": true, "starwars": true, "123123": true, "password1": true,
+		"123qwe": true, "qwerty123": true, "1q2w3e4r": true, "baseball": true,
+		"superman": true, "whatever": true, "trustno1": true, "michael": true,
+	}
+	lowerPassword := strings.ToLower(password)
+	if commonPasswords[lowerPassword] {
+		return fmt.Errorf("password is too common, please choose a stronger password")
+	}
+
+	hasUpper := false
+	hasLower := false
+	hasDigit := false
+	for _, ch := range password {
+		switch {
+		case unicode.IsUpper(ch):
+			hasUpper = true
+		case unicode.IsLower(ch):
+			hasLower = true
+		case unicode.IsDigit(ch):
+			hasDigit = true
+		}
+	}
+	if !hasUpper || !hasLower || !hasDigit {
+		return fmt.Errorf("password must contain at least one uppercase letter, one lowercase letter, and one digit")
+	}
+
+	return nil
 }
 
 type RegisterRequest struct {
@@ -63,24 +105,8 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Password strength validation
-	if len(req.Password) < 8 {
-		WriteError(w, http.StatusBadRequest, "password_too_short", "Password must be at least 8 characters long")
-		return
-	}
-	// Check for at least one uppercase, one lowercase, one digit (Unicode-aware)
-	var hasUpper, hasLower, hasDigit bool
-	for _, ch := range req.Password {
-		switch {
-		case unicode.IsUpper(ch):
-			hasUpper = true
-		case unicode.IsLower(ch):
-			hasLower = true
-		case unicode.IsDigit(ch):
-			hasDigit = true
-		}
-	}
-	if !hasUpper || !hasLower || !hasDigit {
-		WriteError(w, http.StatusBadRequest, "password_too_weak", "Password must contain at least one uppercase letter, one lowercase letter, and one digit")
+	if err := validatePassword(req.Password); err != nil {
+		WriteError(w, http.StatusBadRequest, "password_too_weak", err.Error())
 		return
 	}
 
@@ -103,19 +129,28 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := &models.User{
-		Email:      req.Email,
-		Phone:      req.Phone,
-		FirstName:  req.FirstName,
-		LastName:   req.LastName,
-		MiddleName: req.MiddleName,
-		Status:     models.UserStatusActive,
-		Role:       models.UserRoleUser,
+		Email:     req.Email,
+		Phone:     req.Phone,
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Status:    models.UserStatusActive,
+		Role:      models.UserRoleUser,
+	}
+	// Only set MiddleName if it's not empty
+	if req.MiddleName != "" {
+		user.MiddleName = &req.MiddleName
 	}
 
 	if err := h.storage.CreateUser(r.Context(), user, string(hashedPassword)); err != nil {
 		h.logger.Error("failed to create user", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create user")
 		return
+	}
+
+	// Create XMPP user
+	if err := h.ejabberd.CreateUser(user.ID, req.Password); err != nil {
+		h.logger.Error("failed to create XMPP user", "error", err)
+		// Continue anyway - XMPP is optional
 	}
 
 	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
@@ -140,7 +175,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up old sessions for this user (keep only 5 most recent) - synchronous to avoid goroutine leak
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := h.storage.DeleteOldSessionsForUser(cleanupCtx, user.ID, 5); err != nil {
 		h.logger.Error("failed to cleanup old sessions", "error", err)
@@ -180,11 +215,33 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
 		h.logger.Warn("login: password mismatch", "email", req.Email, "error", err)
+
+		// Track failed login attempt for account lockout
+		if err := h.trackFailedLoginAttempt(r.Context(), req.Email, getClientIP(r)); err != nil {
+			h.logger.Error("failed to record login attempt", "error", err)
+		}
+
+		// Check if account should be locked
+		locked, err := h.isAccountLocked(r.Context(), req.Email)
+		if err != nil {
+			h.logger.Error("failed to check account lock status", "error", err)
+		}
+		if locked {
+			h.logger.Warn("login: account locked due to too many failed attempts", "email", req.Email)
+			WriteError(w, http.StatusTooManyRequests, "account_locked", "Account temporarily locked due to too many failed login attempts. Please try again later.")
+			return
+		}
+
 		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}
 
 	h.logger.Info("login: password verified", "email", req.Email)
+
+	// Record successful login attempt
+	if err := h.storage.RecordLoginAttempt(r.Context(), req.Email, getClientIP(r), &user.ID, true); err != nil {
+		h.logger.Error("failed to record successful login attempt", "error", err)
+	}
 
 	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {
@@ -208,7 +265,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up old sessions for this user (keep only 5 most recent) - synchronous to avoid goroutine leak
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := h.storage.DeleteOldSessionsForUser(cleanupCtx, user.ID, 5); err != nil {
 		h.logger.Error("failed to cleanup old sessions", "error", err)
@@ -266,6 +323,127 @@ func (h *Handler) getCurrentUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusOK, user)
+}
+
+func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	if req.OldPassword == "" || req.NewPassword == "" {
+		WriteError(w, http.StatusBadRequest, "missing_fields", "Old password and new password are required")
+		return
+	}
+
+	// Validate new password strength
+	if err := validatePassword(req.NewPassword); err != nil {
+		WriteError(w, http.StatusBadRequest, "password_too_weak", err.Error())
+		return
+	}
+
+	// Get current user with password hash using UserID instead of Email
+	// This handles the case where user changes email after JWT was issued
+	user, passwordHash, err := h.storage.GetUserByIDWithPassword(r.Context(), claims.UserID)
+	if err != nil || user == nil {
+		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
+		return
+	}
+
+	// Verify old password
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.OldPassword)); err != nil {
+		WriteError(w, http.StatusUnauthorized, "invalid_password", "Invalid old password")
+		return
+	}
+
+	// Hash new password
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		h.logger.Error("failed to hash password", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Internal server error")
+		return
+	}
+
+	// Update password in database
+	if err := h.storage.UpdateUserPassword(r.Context(), user.ID, string(hashedPassword)); err != nil {
+		h.logger.Error("failed to update password", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update password")
+		return
+	}
+
+	// Update password in XMPP
+	if err := h.ejabberd.UpdateUserPassword(user.ID, req.NewPassword); err != nil {
+		h.logger.Error("failed to update XMPP password", "error", err)
+		// Continue anyway - XMPP is optional
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	// Verify old password before deletion
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	if req.Password == "" {
+		WriteError(w, http.StatusBadRequest, "missing_password", "Password is required for deletion")
+		return
+	}
+
+	// Get current user with password hash using UserID (consistent with changePassword)
+	user, passwordHash, err := h.storage.GetUserByIDWithPassword(r.Context(), claims.UserID)
+	if err != nil || user == nil {
+		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
+		return
+	}
+
+	// Verify password
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		WriteError(w, http.StatusUnauthorized, "invalid_password", "Invalid password")
+		return
+	}
+
+	// Delete user from database first (source of truth)
+	deleteErr := h.storage.DeleteUser(r.Context(), user.ID)
+	if deleteErr != nil {
+		h.logger.Error("failed to delete user", "error", deleteErr)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete user")
+		return
+	}
+
+	// Delete XMPP user (optional, best effort)
+	if err := h.ejabberd.DeleteUser(user.ID); err != nil {
+		h.logger.Error("failed to delete XMPP user", "error", err)
+		// Continue anyway - XMPP is optional and user is already deleted from database
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func AuthMiddleware(jwtService *auth.JWTService, sessionStorage storage.SessionStorage) func(http.Handler) http.Handler {

@@ -10,6 +10,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// LiveKitRoomInfo contains LiveKit room information
+type LiveKitRoomInfo struct {
+	RoomName    string
+	URL         string
+	CallerToken string
+	CalleeToken string
+}
+
 // WebRTC signaling message types
 const (
 	EventCallOffer   = "call_offer"
@@ -57,14 +65,14 @@ type CallIcePayload struct {
 
 // ActiveCall represents an ongoing call
 type ActiveCall struct {
-	ID        uuid.UUID
-	ChatID    uuid.UUID
-	CallerID  uuid.UUID
-	CalleeID  uuid.UUID
-	Type      CallType
-	StartTime time.Time
-	Answered  bool
-	mu        sync.RWMutex
+	ID           uuid.UUID
+	ChatID       uuid.UUID
+	CallerID     uuid.UUID
+	Participants map[uuid.UUID]bool // participant_id -> true
+	Type         CallType
+	StartTime    time.Time
+	Answered     bool
+	mu           sync.RWMutex
 }
 
 // CallManager manages active calls
@@ -82,21 +90,32 @@ func NewCallManager() *CallManager {
 
 // StartCall starts a new call
 func (cm *CallManager) StartCall(chatID, callerID, calleeID uuid.UUID, callType CallType) *ActiveCall {
+	return cm.StartGroupCall(chatID, callerID, []uuid.UUID{calleeID}, callType)
+}
+
+// StartGroupCall starts a new group call with multiple participants
+func (cm *CallManager) StartGroupCall(chatID, callerID uuid.UUID, participantIDs []uuid.UUID, callType CallType) *ActiveCall {
+	participants := make(map[uuid.UUID]bool)
+	participants[callerID] = true
+	for _, pid := range participantIDs {
+		participants[pid] = true
+	}
+
 	call := &ActiveCall{
-		ID:        uuid.New(),
-		ChatID:    chatID,
-		CallerID:  callerID,
-		CalleeID:  calleeID,
-		Type:      callType,
-		StartTime: time.Now(),
+		ID:           uuid.New(),
+		ChatID:       chatID,
+		CallerID:     callerID,
+		Participants: participants,
+		Type:         callType,
+		StartTime:    time.Now(),
 	}
 
 	cm.mu.Lock()
 	cm.calls[call.ID] = call
 	cm.mu.Unlock()
 
-	log.Printf("[WebRTC] Call started: %s (type: %s, caller: %s, callee: %s)",
-		call.ID, callType, callerID, calleeID)
+	log.Printf("[WebRTC] Group call started: %s (type: %s, caller: %s, participants: %v)",
+		call.ID, callType, callerID, participants)
 
 	return call
 }
@@ -126,7 +145,7 @@ func (cm *CallManager) IsUserInCall(userID uuid.UUID) bool {
 	defer cm.mu.RUnlock()
 
 	for _, call := range cm.calls {
-		if call.CallerID == userID || call.CalleeID == userID {
+		if call.Participants[userID] {
 			return true
 		}
 	}
@@ -159,6 +178,35 @@ func (cm *CallManager) MarkCallAsAnswered(callID uuid.UUID) {
 	}
 }
 
+// AddParticipant adds a user to an existing call
+func (cm *CallManager) AddParticipant(callID, userID uuid.UUID) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if call, exists := cm.calls[callID]; exists {
+		call.Participants[userID] = true
+		log.Printf("[WebRTC] Added participant %s to call %s", userID, callID)
+		return true
+	}
+	return false
+}
+
+// RemoveParticipant removes a user from a call
+func (cm *CallManager) RemoveParticipant(callID, userID uuid.UUID) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+
+	if call, exists := cm.calls[callID]; exists {
+		delete(call.Participants, userID)
+		log.Printf("[WebRTC] Removed participant %s from call %s", userID, callID)
+		// If no participants left, end the call
+		if len(call.Participants) == 0 {
+			delete(cm.calls, callID)
+			log.Printf("[WebRTC] Call %s ended - no participants", callID)
+		}
+	}
+}
+
 // HandleCallOffer processes a call offer
 func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	var offer CallOfferPayload
@@ -173,6 +221,14 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	if callerInRoom {
 		_, callerInRoom = room[client]
 	}
+	// Verify callee is also in the chat room
+	calleeInRoom := false
+	for c := range room {
+		if c.UserID == offer.CalleeID {
+			calleeInRoom = true
+			break
+		}
+	}
 	h.mu.RUnlock()
 
 	if !callerInRoom {
@@ -186,6 +242,20 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 			},
 		})
 		log.Printf("[WebRTC] Call offer rejected: caller %s is not in chat room %s", client.UserID, offer.ChatID)
+		return
+	}
+
+	if !calleeInRoom {
+		h.sendToClient(client, &BroadcastMessage{
+			Type:   EventCallError,
+			ChatID: offer.ChatID,
+			Payload: map[string]interface{}{
+				"call_id": "",
+				"error":   "callee_not_in_chat",
+				"message": "Callee is not in this chat room",
+			},
+		})
+		log.Printf("[WebRTC] Call offer rejected: callee %s is not in chat room %s", offer.CalleeID, offer.ChatID)
 		return
 	}
 
@@ -213,6 +283,38 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	offer.CallID = call.ID
 	offer.CallerID = client.UserID // Ensure caller ID matches authenticated user
 
+	// Generate LiveKit room name (using call ID)
+	roomName := call.ID.String()
+
+	// Create LiveKit room and generate tokens
+	var liveKitRoom *LiveKitRoomInfo
+	if h.liveKit != nil && h.liveKit.IsConfigured() {
+		// Create LiveKit room
+		ctx := context.Background()
+		if err := h.liveKit.CreateRoom(ctx, roomName); err != nil {
+			log.Printf("[WebRTC] Failed to create LiveKit room: %v", err)
+			// Continue without LiveKit - fallback to peer-to-peer
+		} else {
+			// Generate tokens for both participants
+			callerToken, err := h.liveKit.GenerateToken(roomName, offer.CallerID.String())
+			if err != nil {
+				log.Printf("[WebRTC] Failed to generate caller token: %v", err)
+			}
+			calleeToken, err := h.liveKit.GenerateToken(roomName, offer.CalleeID.String())
+			if err != nil {
+				log.Printf("[WebRTC] Failed to generate callee token: %v", err)
+			}
+
+			liveKitRoom = &LiveKitRoomInfo{
+				RoomName:    roomName,
+				URL:         h.liveKitURL,
+				CallerToken: callerToken,
+				CalleeToken: calleeToken,
+			}
+			log.Printf("[WebRTC] LiveKit room created: %s", roomName)
+		}
+	}
+
 	// Find the callee client using userClients map
 	h.mu.RLock()
 	calleeClient := h.userClients[offer.CalleeID]
@@ -235,20 +337,48 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 		return
 	}
 
-	// Send offer to specific callee
-	h.sendToClient(calleeClient, &BroadcastMessage{
-		Type:   EventCallOffer,
-		ChatID: offer.ChatID,
-		Payload: map[string]interface{}{
-			"call_id":   call.ID,
-			"chat_id":   offer.ChatID,
-			"caller_id": client.UserID,
-			"type":      offer.Type,
-			"sdp":       offer.SDP,
-		},
+	// Send call_id back to caller only after validating callee is online
+	callerPayload := map[string]interface{}{
+		"call_id": call.ID,
+		"chat_id": offer.ChatID,
+		"type":    offer.Type,
+		"sdp":     offer.SDP,
+	}
+	if liveKitRoom != nil {
+		callerPayload["livekit"] = map[string]interface{}{
+			"room_name": liveKitRoom.RoomName,
+			"url":       liveKitRoom.URL,
+			"token":     liveKitRoom.CallerToken,
+		}
+	}
+	h.sendToClient(client, &BroadcastMessage{
+		Type:    EventCallOffer,
+		ChatID:  offer.ChatID,
+		Payload: callerPayload,
 	})
 
-	log.Printf("[WebRTC] Call offer sent: %s to callee %s", call.ID, offer.CalleeID)
+	// Send offer to specific callee
+	calleePayload := map[string]interface{}{
+		"call_id":   call.ID,
+		"chat_id":   offer.ChatID,
+		"caller_id": client.UserID,
+		"type":      offer.Type,
+		"sdp":       offer.SDP,
+	}
+	if liveKitRoom != nil {
+		calleePayload["livekit"] = map[string]interface{}{
+			"room_name": liveKitRoom.RoomName,
+			"url":       liveKitRoom.URL,
+			"token":     liveKitRoom.CalleeToken,
+		}
+	}
+	h.sendToClient(calleeClient, &BroadcastMessage{
+		Type:    EventCallOffer,
+		ChatID:  offer.ChatID,
+		Payload: calleePayload,
+	})
+
+	log.Printf("[WebRTC] Call offer sent: %s to callee %s (LiveKit: %v)", call.ID, offer.CalleeID, liveKitRoom != nil)
 
 	// Create system message for call initiated
 	go func() {
@@ -312,6 +442,12 @@ func (h *Hub) HandleCallIce(client *Client, payload []byte) {
 		return
 	}
 
+	// Validate call_id
+	if ice.CallID == uuid.Nil {
+		log.Printf("[WebRTC] ICE candidate with empty call_id from user %s", client.UserID)
+		return
+	}
+
 	call := h.callManager.GetCall(ice.CallID)
 	if call == nil {
 		log.Printf("[WebRTC] Call not found for ICE: %s", ice.CallID)
@@ -320,10 +456,11 @@ func (h *Hub) HandleCallIce(client *Client, payload []byte) {
 
 	// Determine target user (the other party in the call)
 	var targetUserID uuid.UUID
-	if client.UserID == call.CallerID {
-		targetUserID = call.CalleeID
-	} else {
-		targetUserID = call.CallerID
+	for participantID := range call.Participants {
+		if participantID != client.UserID {
+			targetUserID = participantID
+			break
+		}
 	}
 
 	// Find the target client

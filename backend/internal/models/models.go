@@ -12,8 +12,8 @@ type User struct {
 	Phone        string     `json:"phone,omitempty" db:"phone"`
 	FirstName    string     `json:"first_name" db:"first_name"`
 	LastName     string     `json:"last_name" db:"last_name"`
-	MiddleName   string     `json:"middle_name,omitempty" db:"middle_name"`
-	Avatar       string     `json:"avatar,omitempty" db:"avatar"`
+	MiddleName   *string    `json:"middle_name,omitempty" db:"middle_name"`
+	Avatar       *string    `json:"avatar,omitempty" db:"avatar"`
 	Status       string     `json:"status" db:"status"`
 	CustomStatus *string    `json:"custom_status,omitempty" db:"custom_status"`
 	Role         string     `json:"role" db:"role"`
@@ -25,6 +25,15 @@ type User struct {
 type UserCredentials struct {
 	UserID       uuid.UUID `json:"user_id" db:"user_id"`
 	PasswordHash string    `json:"-" db:"password_hash"`
+}
+
+type WebPushSubscription struct {
+	ID        uuid.UUID `json:"id" db:"id"`
+	UserID    uuid.UUID `json:"user_id" db:"user_id"`
+	Endpoint  string    `json:"endpoint" db:"endpoint"`
+	Key       string    `json:"key" db:"key"`
+	Auth      string    `json:"auth" db:"auth"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
 type Chat struct {
@@ -53,19 +62,24 @@ type ChatMember struct {
 }
 
 type Message struct {
-	ID          uuid.UUID   `json:"id" db:"id"`
-	ChatID      uuid.UUID   `json:"chat_id" db:"chat_id"`
-	SenderID    uuid.UUID   `json:"sender_id" db:"sender_id"`
-	Type        string      `json:"type" db:"type"`
-	Content     string      `json:"content" db:"content"`
-	FileURL     *string     `json:"file_url,omitempty" db:"file_url"`
-	ReplyTo     *uuid.UUID  `json:"reply_to,omitempty" db:"reply_to"`
-	CreatedAt   time.Time   `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at" db:"updated_at"`
-	ReadBy      []uuid.UUID `json:"read_by,omitempty" db:"-"`
-	Duration    *float64    `json:"duration,omitempty" db:"duration"`         // For audio messages in seconds
-	ScheduledAt *time.Time  `json:"scheduled_at,omitempty" db:"scheduled_at"` // For scheduled messages
-	ThreadID    *uuid.UUID  `json:"thread_id,omitempty" db:"thread_id"`       // For message threads
+	ID                  uuid.UUID   `json:"id" db:"id"`
+	ChatID              uuid.UUID   `json:"chat_id" db:"chat_id"`
+	SenderID            uuid.UUID   `json:"sender_id" db:"sender_id"`
+	Type                string      `json:"type" db:"type"`
+	Content             string      `json:"content" db:"content"`
+	FileURL             *string     `json:"file_url,omitempty" db:"file_url"`
+	ReplyTo             *uuid.UUID  `json:"reply_to,omitempty" db:"reply_to"`
+	ReplyToContent      *string     `json:"reply_to_content,omitempty" db:"-"`
+	ReplyToSenderName   *string     `json:"reply_to_sender_name,omitempty" db:"-"`
+	CreatedAt           time.Time   `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time   `json:"updated_at" db:"updated_at"`
+	ReadBy              []uuid.UUID `json:"read_by,omitempty" db:"-"`
+	Pinned              bool        `json:"pinned" db:"pinned"`                                         // Whether message is pinned
+	Duration            *float64    `json:"duration,omitempty" db:"duration"`                           // For audio messages in seconds
+	ScheduledAt         *time.Time  `json:"scheduled_at,omitempty" db:"scheduled_at"`                   // For scheduled messages
+	ThreadID            *uuid.UUID  `json:"thread_id,omitempty" db:"thread_id"`                         // For message threads
+	ForwardedFrom       *uuid.UUID  `json:"forwarded_from,omitempty" db:"forwarded_from"`               // Original sender ID when message is forwarded
+	ForwardedSenderName *string     `json:"forwarded_sender_name,omitempty" db:"forwarded_sender_name"` // Original sender name when message is forwarded
 	// E2E Encryption fields
 	EncryptedContent string            `json:"encrypted_content,omitempty" db:"encrypted_content"`
 	EncryptionKeyID  *uuid.UUID        `json:"encryption_key_id,omitempty" db:"encryption_key_id"`
@@ -135,14 +149,15 @@ type Reaction struct {
 }
 
 type NotificationSettings struct {
-	UserID            uuid.UUID `json:"user_id" db:"user_id"`
-	PushEnabled       bool      `json:"push_enabled" db:"push_enabled"`
-	EmailEnabled      bool      `json:"email_enabled" db:"email_enabled"`
-	Email             string    `json:"email,omitempty" db:"email"`
-	QuietHoursStart   *string   `json:"quiet_hours_start,omitempty" db:"quiet_hours_start"`
-	QuietHoursEnd     *string   `json:"quiet_hours_end,omitempty" db:"quiet_hours_end"`
-	QuietHoursEnabled bool      `json:"quiet_hours_enabled" db:"quiet_hours_enabled"`
-	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
+	UserID             uuid.UUID `json:"user_id" db:"user_id"`
+	PushEnabled        bool      `json:"push_enabled" db:"push_enabled"`
+	EmailEnabled       bool      `json:"email_enabled" db:"email_enabled"`
+	Email              string    `json:"email,omitempty" db:"email"`
+	QuietHoursStart    *string   `json:"quiet_hours_start,omitempty" db:"quiet_hours_start"`
+	QuietHoursEnd      *string   `json:"quiet_hours_end,omitempty" db:"quiet_hours_end"`
+	QuietHoursEnabled  bool      `json:"quiet_hours_enabled" db:"quiet_hours_enabled"`
+	ProtocolPreference string    `json:"protocol_preference" db:"protocol_preference"` // "websocket" or "xmpp"
+	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
 }
 
 type UnreadCount struct {

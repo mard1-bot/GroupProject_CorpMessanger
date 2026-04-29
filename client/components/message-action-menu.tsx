@@ -25,6 +25,7 @@ interface MessageActionMenuProps {
   onPin: (messageId: string) => void;
   onUnpin: (messageId: string) => void;
   onForward: (messageId: string) => void;
+  onReply: (messageId: string) => void;
   messageContent?: string;
   isPinned?: boolean;
 }
@@ -44,6 +45,7 @@ export function MessageActionMenu({
   onPin,
   onUnpin,
   onForward,
+  onReply,
   messageContent = '',
   isPinned = false,
 }: MessageActionMenuProps) {
@@ -70,9 +72,13 @@ export function MessageActionMenu({
       if (isPinned) {
         await api.unpinMessage(chatId, messageId);
         console.log('[MessageActionMenu] Message unpinned successfully');
+        Alert.alert('Успешно', 'Сообщение откреплено');
+        onUnpin(messageId);
       } else {
         await api.pinMessage(chatId, messageId);
         console.log('[MessageActionMenu] Message pinned successfully');
+        Alert.alert('Успешно', 'Сообщение закреплено');
+        onPin(messageId);
       }
       onClose();
     } catch (error) {
@@ -83,15 +89,15 @@ export function MessageActionMenu({
 
   const handleForward = async () => {
     console.log('[MessageActionMenu] Forwarding message:', messageId);
-    try {
-      await api.forwardMessage(chatId, messageId);
-      console.log('[MessageActionMenu] Message forwarded successfully');
-      onClose();
-      Alert.alert('Успешно', 'Сообщение готово для пересылки');
-    } catch (error) {
-      console.error('[MessageActionMenu] Failed to forward message:', error);
-      Alert.alert('Ошибка', 'Не удалось переслать сообщение');
-    }
+    // Just trigger the callback - parent will handle chat selection
+    onForward(messageId);
+    onClose();
+  };
+
+  const handleReply = () => {
+    console.log('[MessageActionMenu] Replying to message:', messageId);
+    onReply(messageId);
+    onClose();
   };
 
   const canDelete = isOwn || !isGroup || userRole === 'owner' || userRole === 'admin';
@@ -99,6 +105,14 @@ export function MessageActionMenu({
   const canPin = true;
 
   const actions = [];
+
+  // Reply button
+  actions.push({
+    icon: 'reply' as const,
+    label: 'Ответить',
+    onPress: handleReply,
+    color: textColor,
+  });
 
   if (canPin) {
     actions.push({

@@ -1,20 +1,26 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	stdhttp "net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/ejabberd"
+	"corp-messenger/backend/internal/livekit"
 	"corp-messenger/backend/internal/notifications"
 	"corp-messenger/backend/internal/storage"
 	"corp-messenger/backend/internal/websocket"
+	"corp-messenger/backend/internal/xmppsync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -30,6 +36,12 @@ type Handler struct {
 	hub             *websocket.Hub
 	notificationSvc *notifications.Service
 	baseURL         string
+	syncService     *xmppsync.SyncService
+	turnServerURI   string
+	turnUsername    string
+	turnPassword    string
+	liveKit         *livekit.Service
+	rateLimiter     *RedisRateLimiter
 }
 
 // Rate limiting
@@ -46,7 +58,19 @@ var (
 	rateLimitCleanupOnce sync.Once
 	rateLimitRequests    = 20 // Default: 20 requests per window
 	rateLimitWindow      = 60 // Default: 60 seconds
+
+	// Failed login attempt tracking (in-memory - should use database in production)
+	loginAttempts     = make(map[string]*loginAttemptEntry)
+	loginAttemptsMux  sync.RWMutex
+	maxFailedAttempts = 5                // Lock account after 5 failed attempts
+	lockoutDuration   = 15 * time.Minute // Lock for 15 minutes
 )
+
+type loginAttemptEntry struct {
+	count       int
+	lastFailed  time.Time
+	lockedUntil time.Time
+}
 
 // StartRateLimitCleanup starts a background goroutine that periodically cleans up expired rate limit entries
 func StartRateLimitCleanup() {
@@ -76,6 +100,39 @@ func StopRateLimitCleanup() {
 	rateLimitCleanupOnce.Do(func() {
 		close(rateLimitStopChan)
 	})
+}
+
+// sanitizeInput sanitizes user input to prevent XSS and injection attacks
+func sanitizeInput(input string) string {
+	// Remove null bytes
+	input = strings.ReplaceAll(input, "\x00", "")
+
+	// Trim whitespace
+	input = strings.TrimSpace(input)
+
+	// Limit length to prevent DoS
+	if len(input) > 10000 {
+		input = input[:10000]
+	}
+
+	return input
+}
+
+// trackFailedLoginAttempt tracks failed login attempts for account lockout using database
+func (h *Handler) trackFailedLoginAttempt(ctx context.Context, email, ip string) error {
+	return h.storage.RecordLoginAttempt(ctx, email, ip, nil, false)
+}
+
+// isAccountLocked checks if an account is currently locked using database
+func (h *Handler) isAccountLocked(ctx context.Context, email string) (bool, error) {
+	// Check failed attempts in the last 15 minutes
+	since := time.Now().Add(-lockoutDuration)
+	count, err := h.storage.GetFailedLoginAttempts(ctx, email, since)
+	if err != nil {
+		return false, err
+	}
+
+	return count >= maxFailedAttempts, nil
 }
 
 // getClientIP extracts client IP with proxy-aware validation
@@ -120,93 +177,31 @@ func isValidIP(ip string) bool {
 	if strings.HasPrefix(ip, "[") && strings.HasSuffix(ip, "]") {
 		ip = ip[1 : len(ip)-1]
 	}
-	// Basic check: IPv4 has dots, IPv6 has colons
-	hasDots := strings.Contains(ip, ".")
-	hasColons := strings.Contains(ip, ":")
-	if !hasDots && !hasColons {
-		return false
-	}
-	// Should not have both (mixed format is invalid)
-	if hasDots && hasColons {
-		return false
-	}
-	// Basic length checks (after stripping zone ID and brackets)
-	if len(ip) < 7 || len(ip) > 45 { // Min IPv4: 1.1.1.1 (7), Max IPv6: 45 chars
-		return false
-	}
-	// Should only contain valid IP characters
-	for _, c := range ip {
-		valid := (c >= '0' && c <= '9') || c == '.' || c == ':' || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-		if !valid {
-			return false
-		}
-	}
-	return true
+	// Use net.ParseIP for proper IP validation
+	parsedIP := net.ParseIP(ip)
+	return parsedIP != nil
 }
 
-// Simple rate limiter: configurable requests per window per IP
-func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
+// Redis-based rate limiter: configurable requests per window per IP
+func (h *Handler) rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		ip := getClientIP(r)
-		now := time.Now()
 
-		rateLimitMux.Lock()
-		entry, exists := rateLimits[ip]
-		if !exists || now.After(entry.resetTime) {
-			rateLimits[ip] = &rateLimitEntry{
-				count:     1,
-				resetTime: now.Add(time.Duration(rateLimitWindow) * time.Second),
-			}
-			rateLimitMux.Unlock()
+		// Check rate limit using Redis
+		allowed, remaining, resetTime, err := h.rateLimiter.CheckRateLimit(r.Context(), ip, rateLimitRequests, rateLimitWindow)
+		if err != nil {
+			// If Redis is down, allow the request but log error
+			h.logger.Error("Rate limiter error", "error", err, "ip", ip)
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		entry.count++
-		rateLimits[ip] = entry
+		// Set rate limit headers
+		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(rateLimitRequests))
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetTime.Unix(), 10))
 
-		// Prevent memory exhaustion by limiting number of tracked IPs
-		if len(rateLimits) > maxRateLimitEntries {
-			// First, remove expired entries
-			now := time.Now()
-			for k, v := range rateLimits {
-				if now.After(v.resetTime) {
-					delete(rateLimits, k)
-				}
-			}
-			// If still over capacity, remove oldest entries by reset time
-			if len(rateLimits) > maxRateLimitEntries {
-				type ipTime struct {
-					ip        string
-					resetTime time.Time
-				}
-				entries := make([]ipTime, 0, len(rateLimits))
-				for k, v := range rateLimits {
-					entries = append(entries, ipTime{ip: k, resetTime: v.resetTime})
-				}
-				// Sort by reset time (oldest first)
-				for i := 0; i < len(entries); i++ {
-					for j := i + 1; j < len(entries); j++ {
-						if entries[i].resetTime.After(entries[j].resetTime) {
-							entries[i], entries[j] = entries[j], entries[i]
-						}
-					}
-				}
-				// Remove oldest 25% of entries
-				toRemove := len(entries) / 4
-				if toRemove < 1 {
-					toRemove = 1
-				}
-				for i := 0; i < toRemove; i++ {
-					delete(rateLimits, entries[i].ip)
-				}
-			}
-		}
-
-		count := entry.count
-		rateLimitMux.Unlock()
-
-		if count > rateLimitRequests {
+		if !allowed {
 			WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
 			return
 		}
@@ -215,7 +210,7 @@ func rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service, baseURL string, requests, window, entries int) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service, baseURL string, requests, window, entries int, syncService *xmppsync.SyncService, turnServerURI, turnUsername, turnPassword string, liveKit *livekit.Service) stdhttp.Handler {
 	// Set configurable rate limit values
 	if requests > 0 {
 		rateLimitRequests = requests
@@ -230,23 +225,25 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	originsMap := make(map[string]bool)
 	for _, origin := range corsOrigins {
 		origin = strings.ToLower(origin)
-		// Validate origin format: must start with http:// or https:// and not contain path
-		if strings.HasPrefix(origin, "http://") || strings.HasPrefix(origin, "https://") {
-			// Strip any path component - only keep scheme://host:port
-			// Handle both http:// (7 chars) and https:// (8 chars)
-			schemeLen := 7
-			if strings.HasPrefix(origin, "https://") {
-				schemeLen = 8
-			}
-			if idx := strings.Index(origin[schemeLen:], "/"); idx != -1 {
-				origin = origin[:idx+schemeLen]
-			}
-			originsMap[origin] = true
+		// Validate origin format using URL parsing
+		parsedURL, err := url.Parse(origin)
+		if err != nil {
+			continue // Skip invalid origins
 		}
+		// Only allow http and https schemes
+		if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+			continue
+		}
+		// Strip path and query components - only keep scheme://host:port
+		normalizedOrigin := parsedURL.Scheme + "://" + parsedURL.Host
+		originsMap[normalizedOrigin] = true
 	}
 
 	// Set allowed origins for WebSocket origin validation
 	websocket.AllowedOrigins = originsMap
+
+	// Initialize Redis rate limiter
+	rateLimiter := NewRedisRateLimiter("redis:6379")
 
 	h := &Handler{
 		logger:          logger,
@@ -258,12 +255,20 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		hub:             hub,
 		notificationSvc: notificationSvc,
 		baseURL:         baseURL,
+		syncService:     syncService,
+		turnServerURI:   turnServerURI,
+		turnUsername:    turnUsername,
+		turnPassword:    turnPassword,
+		liveKit:         liveKit,
+		rateLimiter:     rateLimiter,
 	}
 
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(SecurityHeadersMiddleware)
+	r.Use(CSRFProtectionMiddleware)
 	r.Use(h.corsMiddleware)
 	r.Use(AccessLogMiddleware(logger))
 	r.Use(RecoverMiddleware(logger))
@@ -278,23 +283,31 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Auth endpoints with rate limiting
-		r.With(rateLimitMiddleware).Post("/auth/register", h.register)
-		r.With(rateLimitMiddleware).Post("/auth/login", h.login)
+		r.With(h.rateLimitMiddleware).Post("/auth/register", h.register)
+		r.With(h.rateLimitMiddleware).Post("/auth/login", h.login)
 
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(h.jwt, h.storage))
 
 			r.Post("/auth/logout", h.logout)
 			r.Get("/auth/me", h.getCurrentUser)
+			r.Post("/auth/change-password", h.changePassword)
+			r.Delete("/auth/me", h.deleteUser)
+			r.Get("/webrtc/turn", h.getTurnConfig)
 
 			r.Get("/users", h.getUsers)
 			r.Put("/users/me/status", h.updateUserStatus)
 			r.Post("/users/me/avatar", h.uploadAvatar)
 			r.Get("/users/me/mentions", h.getUserMentions)
 
+			// ... (rest of the code remains the same)
 			r.Post("/chats", h.createChat)
 			r.Get("/chats", h.getUserChats)
+			// Chat-specific routes must be declared before generic /chats/{id} to avoid conflicts
+			r.Get("/chats/{id}/export", h.exportChat)
+			r.Post("/chats/{id}/avatar", h.uploadChatAvatar)
 			r.Get("/chats/{id}", h.getChatByID)
+			r.Put("/chats/{id}", h.updateChat)
 			r.Delete("/chats/{id}", h.deleteChat)
 			r.Post("/chats/{id}/members", h.addChatMember)
 			r.Delete("/chats/{id}/members/{userID}", h.removeChatMember)
@@ -306,11 +319,11 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Post("/chats/{id}/unarchive", h.unarchiveChat)
 			r.Delete("/chats/{id}/me", h.softDeleteChat)
 			r.Delete("/chats/{id}/history", h.clearChatHistory)
-			r.Get("/chats/{id}/export", h.exportChat)
-			r.Post("/chats/{id}/avatar", h.uploadChatAvatar)
 
 			r.Post("/messages/{id}/reply", h.replyMessage)
 			r.Post("/messages/{id}/forward", h.forwardMessage)
+			r.Post("/messages/{id}/thread", h.startThread)
+			r.Get("/threads/{id}", h.getThreadMessages)
 			r.Get("/messages/{id}/reactions", h.getMessageReactions)
 			r.Post("/reactions", h.addReaction)
 			r.Delete("/reactions", h.removeReaction)
@@ -324,12 +337,17 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Put("/chats/{id}/messages/{msgID}", h.editMessage)
 			r.Delete("/chats/{id}/messages/{msgID}", h.deleteMessage)
 			r.Post("/chats/{id}/messages/{msgID}/files", h.uploadFile)
+			r.Post("/chats/{id}/messages/pin", h.pinMessage)
+			r.Post("/chats/{id}/messages/unpin", h.unpinMessage)
+			r.Get("/chats/{id}/messages/pinned", h.getPinnedMessages)
 
 			// Notifications
 			r.Post("/devices/register", h.registerDevice)
 			r.Get("/notifications/settings", h.getNotificationSettings)
 			r.Put("/notifications/settings", h.updateNotificationSettings)
 			r.Get("/notifications/unread", h.getUnreadCount)
+			r.Post("/notifications/web-push", h.registerWebPushSubscription)
+			r.Delete("/notifications/web-push", h.unregisterWebPushSubscription)
 
 			// E2E Encryption
 			r.Post("/encryption/keys", h.registerPublicKey)
@@ -366,26 +384,21 @@ func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	return stdhttp.HandlerFunc(func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 		origin := strings.ToLower(r.Header.Get("Origin"))
 
-		// Validate origin format - must start with http:// or https:// and not contain path
+		// Validate and normalize origin format using URL parsing
+		normalizedOrigin := ""
 		if origin != "" {
-			hasPath := false
-			if strings.HasPrefix(origin, "http://") {
-				hasPath = strings.Contains(origin[7:], "/")
-			} else if strings.HasPrefix(origin, "https://") {
-				hasPath = strings.Contains(origin[8:], "/")
-			} else {
-				// Invalid scheme
-				origin = ""
-			}
-			if hasPath {
-				// Invalid origin format - treat as no origin
-				origin = ""
+			parsedURL, err := url.Parse(origin)
+			if err == nil {
+				// Only allow http and https schemes
+				if parsedURL.Scheme == "http" || parsedURL.Scheme == "https" {
+					normalizedOrigin = parsedURL.Scheme + "://" + parsedURL.Host
+				}
 			}
 		}
 
 		// Only set CORS headers for whitelisted origins (case-insensitive)
-		if h.corsOrigins[origin] {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
+		if h.corsOrigins[normalizedOrigin] {
+			w.Header().Set("Access-Control-Allow-Origin", normalizedOrigin)
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
@@ -407,6 +420,36 @@ func decodeJSON(r io.Reader, v interface{}) error {
 	decoder := json.NewDecoder(r)
 	decoder.DisallowUnknownFields()
 	return decoder.Decode(v)
+}
+
+func (h *Handler) getTurnConfig(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Return TURN server configuration without credentials
+	// For production, implement TURN REST API for temporary credentials
+	config := map[string]interface{}{}
+	if h.turnServerURI != "" {
+		// Validate that TURN credentials are actually configured
+		if h.turnUsername == "" || h.turnPassword == "" {
+			h.logger.Error("TURN server URI configured but credentials are missing")
+			WriteError(w, stdhttp.StatusServiceUnavailable, "turn_misconfigured", "TURN server is not properly configured")
+			return
+		}
+		config["turn_server_uri"] = h.turnServerURI
+		// Do not expose TURN credentials to client
+		// In production, use TURN REST API to generate temporary credentials
+		// with short expiration based on user ID
+	}
+
+	WriteJSON(w, stdhttp.StatusOK, map[string]interface{}{
+		"user_id": claims.UserID,
+		"turn":    config,
+		"info":    "TURN credentials not exposed. Configure TURN REST API for production.",
+	})
 }
 
 // handleWebSocket handles WebSocket upgrade requests.

@@ -39,6 +39,11 @@ func NewXMPPClient(host string, port int, apiSecret string) *XMPPClient {
 	}
 }
 
+// GetHost returns the XMPP server host
+func (c *XMPPClient) GetHost() string {
+	return c.host
+}
+
 // Ready checks if ejabberd is available
 func (c *XMPPClient) Ready(ctx context.Context) error {
 	url := fmt.Sprintf("http://%s:%d/api/status", c.host, c.port)
@@ -89,6 +94,18 @@ func (c *XMPPClient) DeleteUser(userID uuid.UUID) error {
 	return c.apiRequest("POST", "/api/unregister", payload)
 }
 
+// UpdateUserPassword updates an XMPP user's password
+func (c *XMPPClient) UpdateUserPassword(userID uuid.UUID, password string) error {
+	userJID := fmt.Sprintf("%s@%s", userID.String(), c.host)
+
+	payload := map[string]interface{}{
+		"user":     userJID,
+		"password": password,
+	}
+
+	return c.apiRequest("POST", "/api/change_password", payload)
+}
+
 // CreateChatRoom creates a new XMPP chat room (MUC)
 func (c *XMPPClient) CreateChatRoom(roomID uuid.UUID, title string, ownerID uuid.UUID) error {
 	roomJID := fmt.Sprintf("%s@conference.%s", roomID.String(), c.host)
@@ -122,6 +139,19 @@ func (c *XMPPClient) DestroyChatRoom(roomID uuid.UUID) error {
 	}
 
 	return c.apiRequest("POST", "/api/destroy_room", payload)
+}
+
+// UpdateChatRoomTitle updates a chat room's title
+func (c *XMPPClient) UpdateChatRoomTitle(roomID uuid.UUID, title string) error {
+	roomJID := fmt.Sprintf("%s@conference.%s", roomID.String(), c.host)
+
+	configPayload := map[string]interface{}{
+		"room":    roomJID,
+		"title":   title,
+		"options": map[string]string{"title": title},
+	}
+
+	return c.apiRequest("POST", "/api/change_room_option", configPayload)
 }
 
 // AddMemberToRoom adds a member to a chat room
@@ -162,6 +192,32 @@ func (c *XMPPClient) SendMessage(from, to, body string) error {
 	}
 
 	return c.apiRequest("POST", "/api/send_message", payload)
+}
+
+// SendRoomMessage sends a message to a chat room (MUC)
+func (c *XMPPClient) SendRoomMessage(roomID uuid.UUID, from, body string) error {
+	roomJID := fmt.Sprintf("%s@conference.%s", roomID.String(), c.host)
+
+	payload := map[string]interface{}{
+		"type": "groupchat",
+		"from": from,
+		"to":   roomJID,
+		"body": body,
+	}
+
+	return c.apiRequest("POST", "/api/send_message", payload)
+}
+
+// GetRoomMessages retrieves messages from a chat room
+func (c *XMPPClient) GetRoomMessages(roomID uuid.UUID, limit int) ([]map[string]interface{}, error) {
+	// Note: ejabberd API doesn't have a direct endpoint for retrieving room messages
+	// This would require either:
+	// 1. Using mod_mam for message archiving
+	// 2. Querying the database directly
+	// 3. Using a custom ejabberd module
+	// For now, return empty as this requires additional ejabberd configuration
+	log.Printf("[XMPP] GetRoomMessages called for room %s (not yet implemented)", roomID)
+	return []map[string]interface{}{}, nil
 }
 
 // GetOnlineUsers returns a list of online users

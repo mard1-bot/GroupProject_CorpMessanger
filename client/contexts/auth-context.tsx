@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import api, { User, AuthResponse } from '@/services/api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { notificationService } from '@/services/notifications';
 
 interface AuthContextType {
   user: User | null;
@@ -61,6 +62,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     loadAuthState();
   }, []);
+
+  // Setup notification listeners when authenticated
+  useEffect(() => {
+    const authenticated = !!token && !!user;
+    if (authenticated) {
+      const cleanup = notificationService.setupNotificationListeners();
+      notificationService.registerDeviceToken();
+      return cleanup;
+    }
+  }, [token, user]);
 
   const loadAuthState = async () => {
     try {
@@ -153,6 +164,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async (): Promise<void> => {
     await api.logout();
+    notificationService.clearRegistration();
     await clearAuthState();
   };
 

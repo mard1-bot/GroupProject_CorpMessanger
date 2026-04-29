@@ -11,6 +11,7 @@ import (
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -45,6 +46,8 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req CreateChatRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
@@ -138,6 +141,49 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create XMPP chat room (only for group chats)
+	// Note: This happens after PostgreSQL commit. In case of failure, mark for reconciliation
+	// to sync XMPP rooms with PostgreSQL chats to fix inconsistencies.
+	if chat.Type == models.ChatTypeGroup {
+		xmppRoomCreated := false
+		if err := h.ejabberd.CreateChatRoom(chat.ID, chat.Title, claims.UserID); err != nil {
+			h.logger.Error("XMPP room creation failed - marking for reconciliation", "chat_id", chat.ID, "error", err)
+			// Mark for reconciliation
+			if err := h.storage.MarkChatForReconciliation(r.Context(), chat.ID, "room_not_created", map[string]interface{}{
+				"error":      err.Error(),
+				"title":      chat.Title,
+				"creator_id": claims.UserID,
+			}); err != nil {
+				h.logger.Error("failed to mark chat for reconciliation", "chat_id", chat.ID, "error", err)
+			}
+		} else {
+			xmppRoomCreated = true
+		}
+
+		// Add members to XMPP room only if room was created
+		if xmppRoomCreated {
+			for _, member := range membersList {
+				role := "member"
+				if member.Role == models.ChatRoleOwner {
+					role = "owner"
+				} else if member.Role == models.ChatRoleAdmin {
+					role = "admin"
+				}
+				if err := h.ejabberd.AddMemberToRoom(chat.ID, member.UserID, role); err != nil {
+					h.logger.Error("XMPP member sync failed - marking for reconciliation", "chat_id", chat.ID, "user_id", member.UserID, "error", err)
+					// Mark for reconciliation
+					if err := h.storage.MarkChatForReconciliation(r.Context(), chat.ID, "member_not_added", map[string]interface{}{
+						"error":   err.Error(),
+						"user_id": member.UserID,
+						"role":    role,
+					}); err != nil {
+						h.logger.Error("failed to mark chat for reconciliation", "chat_id", chat.ID, "error", err)
+					}
+				}
+			}
+		}
+	}
+
 	members, err := h.storage.GetChatMembers(r.Context(), chat.ID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
@@ -145,7 +191,33 @@ func (h *Handler) createChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusCreated, ChatResponse{Chat: chat, Members: members})
+	// Return chat with members embedded
+	chatWithMembers := map[string]interface{}{
+		"id":          chat.ID,
+		"type":        chat.Type,
+		"title":       chat.Title,
+		"description": chat.Description,
+		"avatar":      chat.Avatar,
+		"creator_id":  chat.CreatorID,
+		"created_at":  chat.CreatedAt,
+		"updated_at":  chat.UpdatedAt,
+		"members":     members,
+	}
+
+	// Broadcast chat creation to all members
+	if h.hub != nil {
+		for _, member := range members {
+			h.hub.BroadcastToUser(member.UserID, &websocket.BroadcastMessage{
+				Type:   websocket.EventChatCreated,
+				ChatID: chat.ID,
+				Payload: map[string]interface{}{
+					"chat": chatWithMembers,
+				},
+			})
+		}
+	}
+
+	WriteJSON(w, http.StatusCreated, chatWithMembers)
 }
 
 func (h *Handler) getUserChats(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +234,57 @@ func (h *Handler) getUserChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, chats)
+	// Enrich chats with display names and members
+	chatsWithMembers := make([]map[string]interface{}, 0, len(chats))
+	for _, chat := range chats {
+		chatMap := map[string]interface{}{
+			"id":          chat.ID,
+			"type":        chat.Type,
+			"title":       chat.Title,
+			"name":        chat.Title, // Add name field for compatibility
+			"description": chat.Description,
+			"avatar":      chat.Avatar,
+			"creator_id":  chat.CreatorID,
+			"created_at":  chat.CreatedAt,
+			"updated_at":  chat.UpdatedAt,
+		}
+
+		// Get members for display name construction
+		members, err := h.storage.GetChatMembersWithUsers(r.Context(), chat.ID)
+		if err != nil {
+			h.logger.Error("failed to get chat members with users", "chat_id", chat.ID, "error", err)
+			// Continue without member data - use default display name
+		} else {
+			// Find other participant for direct chats
+			if chat.Type != models.ChatTypeGroup && len(members) == 2 {
+				for _, member := range members {
+					if member.UserID != claims.UserID && member.User != nil {
+						displayName := member.User.FirstName + " " + member.User.LastName
+						if displayName == " " || displayName == "" {
+							displayName = member.User.Email
+						}
+						if displayName == "" {
+							displayName = "Чат"
+						}
+						chatMap["display_name"] = displayName
+						chatMap["name"] = displayName // Also update name field
+						break
+					}
+				}
+			}
+			// For group chats, use title if available
+			if chat.Type == "group" && chat.Title == "" {
+				displayName := "Групповой чат"
+				chatMap["title"] = displayName
+				chatMap["name"] = displayName // Also update name field
+			}
+			chatMap["members"] = members
+		}
+
+		chatsWithMembers = append(chatsWithMembers, chatMap)
+	}
+
+	WriteJSON(w, http.StatusOK, chatsWithMembers)
 }
 
 func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +330,19 @@ func (h *Handler) getChatByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, ChatResponse{Chat: chat, Members: members})
+	// Return chat with members embedded
+	chatWithMembers := map[string]interface{}{
+		"id":          chat.ID,
+		"type":        chat.Type,
+		"title":       chat.Title,
+		"description": chat.Description,
+		"avatar":      chat.Avatar,
+		"creator_id":  chat.CreatorID,
+		"created_at":  chat.CreatedAt,
+		"updated_at":  chat.UpdatedAt,
+		"members":     members,
+	}
+	WriteJSON(w, http.StatusOK, chatWithMembers)
 }
 
 func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
@@ -275,6 +409,19 @@ func (h *Handler) deleteChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Broadcast chat deletion to all members
+	if h.hub != nil {
+		for _, member := range members {
+			h.hub.BroadcastToUser(member.UserID, &websocket.BroadcastMessage{
+				Type:   websocket.EventChatDeleted,
+				ChatID: chatID,
+				Payload: map[string]interface{}{
+					"chat_id": chatID.String(),
+				},
+			})
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -292,6 +439,8 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		UserID string `json:"user_id"`
 		Role   string `json:"role,omitempty"`
@@ -398,7 +547,125 @@ func (h *Handler) addChatMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Add member to XMPP room
+	chat, err := h.storage.GetChatByID(r.Context(), chatID)
+	if err == nil && chat != nil && chat.Type == models.ChatTypeGroup {
+		// Map internal role to XMPP role
+		xmppRole := "member"
+		if req.Role == models.ChatRoleOwner {
+			xmppRole = "owner"
+		} else if req.Role == models.ChatRoleAdmin {
+			xmppRole = "admin"
+		}
+		if err := h.ejabberd.AddMemberToRoom(chatID, userID, xmppRole); err != nil {
+			h.logger.Error("failed to add member to XMPP room", "user_id", userID, "error", err)
+			// Continue anyway - XMPP is optional
+		}
+	}
+
 	WriteJSON(w, http.StatusOK, member)
+}
+
+func (h *Handler) updateChat(w http.ResponseWriter, r *http.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	chatID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		return
+	}
+
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	var req struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	if err := decodeJSON(r.Body, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		return
+	}
+	defer r.Body.Close()
+
+	// Validate input lengths
+	const maxChatTitleLength = 200
+	const maxChatDescriptionLength = 1000
+	if len(req.Title) > maxChatTitleLength {
+		WriteError(w, http.StatusBadRequest, "title_too_long", "Chat title exceeds maximum length (200 characters)")
+		return
+	}
+	if len(req.Description) > maxChatDescriptionLength {
+		WriteError(w, http.StatusBadRequest, "description_too_long", "Chat description exceeds maximum length (1000 characters)")
+		return
+	}
+
+	// Get current chat
+	chat, err := h.storage.GetChatByID(r.Context(), chatID)
+	if err != nil || chat == nil {
+		WriteError(w, http.StatusNotFound, "chat_not_found", "Chat not found")
+		return
+	}
+
+	// Check if user is a member
+	members, err := h.storage.GetChatMembers(r.Context(), chatID)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		return
+	}
+
+	if !isChatMember(members, claims.UserID) {
+		WriteError(w, http.StatusForbidden, "forbidden", "Not a member of this chat")
+		return
+	}
+
+	// Get user's role
+	var userRole string
+	for _, m := range members {
+		if m.UserID == claims.UserID {
+			userRole = m.Role
+			break
+		}
+	}
+
+	// Only owner and admin can update chat
+	if userRole != models.ChatRoleOwner && userRole != models.ChatRoleAdmin {
+		WriteError(w, http.StatusForbidden, "forbidden", "Only owner or admin can update chat")
+		return
+	}
+
+	// Sanitize inputs
+	sanitizedTitle := html.EscapeString(strings.TrimSpace(req.Title))
+	sanitizedDescription := html.EscapeString(strings.TrimSpace(req.Description))
+
+	// Validate that title is not empty after sanitization
+	if chat.Type == models.ChatTypeGroup && sanitizedTitle == "" {
+		WriteError(w, http.StatusBadRequest, "invalid_title", "Group chat title cannot be empty")
+		return
+	}
+
+	// Update chat
+	chat.Title = sanitizedTitle
+	chat.Description = sanitizedDescription
+
+	if err := h.storage.UpdateChat(r.Context(), chat); err != nil {
+		h.logger.Error("failed to update chat", "error", err)
+		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update chat")
+		return
+	}
+
+	// Update XMPP chat room title (only for group chats)
+	if chat.Type == models.ChatTypeGroup && chat.Title != "" {
+		if err := h.ejabberd.UpdateChatRoomTitle(chat.ID, chat.Title); err != nil {
+			h.logger.Error("failed to update XMPP room title", "chat_id", chat.ID, "error", err)
+			// Continue anyway - XMPP is optional
+		}
+	}
+
+	WriteJSON(w, http.StatusOK, chat)
 }
 
 func (h *Handler) removeChatMember(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +767,15 @@ func (h *Handler) removeChatMember(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to remove member", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to remove member")
 		return
+	}
+
+	// Remove member from XMPP room
+	chat, err := h.storage.GetChatByID(r.Context(), chatID)
+	if err == nil && chat != nil && chat.Type == models.ChatTypeGroup {
+		if err := h.ejabberd.RemoveMemberFromRoom(chatID, targetUserID); err != nil {
+			h.logger.Error("failed to remove member from XMPP room", "user_id", targetUserID, "error", err)
+			// Continue anyway - XMPP is optional
+		}
 	}
 
 	response := map[string]interface{}{
@@ -787,6 +1063,12 @@ func (h *Handler) softDeleteChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Destroy XMPP chat room
+	if err := h.ejabberd.DestroyChatRoom(chatID); err != nil {
+		h.logger.Error("failed to destroy XMPP chat room", "error", err)
+		// Continue anyway - XMPP is optional
+	}
+
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -876,22 +1158,12 @@ func (h *Handler) exportChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get chat info
-	chat, err := h.storage.GetChatByID(r.Context(), chatID)
-	if err != nil {
-		h.logger.Error("failed to get chat info", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat info")
-		return
-	}
-
-	// Format as JSON
+	// Format as JSON to match frontend expectations
 	exportData := map[string]interface{}{
-		"chat_id":     chatID,
-		"title":       chat.Title,
-		"type":        chat.Type,
-		"created_at":  chat.CreatedAt,
-		"exported_at": time.Now(),
-		"messages":    messages,
+		"chat_id":        chatID,
+		"export_date":    time.Now(),
+		"messages":       messages,
+		"total_messages": len(messages),
 	}
 
 	// Set headers for download

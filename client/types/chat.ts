@@ -48,6 +48,9 @@ export type Message = {
   pinned?: boolean;
   scheduled_at?: string;
   thread_id?: string;
+  reply_to?: string;
+  forwarded_from?: string;
+  forwarded_sender_name?: string;
 };
 
 export type Reaction = {

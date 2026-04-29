@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"corp-messenger/backend/internal/livekit"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/storage"
 	"log"
@@ -48,7 +49,15 @@ type Hub struct {
 	// Storage for creating system messages
 	storage storage.Storage
 
-	mu sync.RWMutex
+	// LiveKit service for group calls
+	liveKit *livekit.Service
+
+	// LiveKit URL
+	liveKitURL string
+
+	mu         sync.RWMutex
+	shutdownMu sync.Mutex
+	shutdown   bool
 }
 
 // BroadcastMessage represents a message to be broadcast to specific room
@@ -61,7 +70,7 @@ type BroadcastMessage struct {
 }
 
 // NewHub creates a new Hub instance.
-func NewHub(storage storage.Storage) *Hub {
+func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string) *Hub {
 	return &Hub{
 		broadcast:   make(chan *BroadcastMessage, 256),
 		register:    make(chan *Client),
@@ -72,13 +81,19 @@ func NewHub(storage storage.Storage) *Hub {
 		typingState: make(map[uuid.UUID]map[uuid.UUID]*TypingState),
 		callManager: NewCallManager(),
 		storage:     storage,
+		liveKit:     liveKit,
+		liveKitURL:  liveKitURL,
 	}
 }
 
 // Run starts the hub's main loop.
-func (h *Hub) Run() {
+func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
+		case <-ctx.Done():
+			log.Println("[Hub] Shutting down hub")
+			h.Shutdown()
+			return
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client] = true
@@ -112,6 +127,7 @@ func (h *Hub) Run() {
 			}
 
 			clientCount := 0
+			var clientsToRemove []*Client
 			for client := range room {
 				// Skip excluded sender
 				if message.ExcludeSender != nil && client.UserID == *message.ExcludeSender {
@@ -123,11 +139,8 @@ func (h *Hub) Run() {
 					clientCount++
 				default:
 					// Client's send buffer is full, mark for removal
-					// Don't close channel here - let unregister handle it
-					h.mu.Lock()
-					delete(h.clients, client)
-					delete(room, client)
-					h.mu.Unlock()
+					// Collect for removal after loop to avoid deadlock
+					clientsToRemove = append(clientsToRemove, client)
 					// Signal client to close itself
 					select {
 					case client.send <- nil:
@@ -136,9 +149,48 @@ func (h *Hub) Run() {
 					}
 				}
 			}
+			// Remove marked clients outside the loop to avoid deadlock
+			if len(clientsToRemove) > 0 {
+				h.mu.Lock()
+				for _, client := range clientsToRemove {
+					delete(h.clients, client)
+					delete(h.userClients, client.UserID)
+					if room, ok := h.rooms[message.ChatID]; ok {
+						delete(room, client)
+						if len(room) == 0 {
+							delete(h.rooms, message.ChatID)
+						}
+					}
+				}
+				h.mu.Unlock()
+			}
 			log.Printf("[Hub] Broadcast %s to %d clients in chat %s", message.Type, clientCount, message.ChatID)
 		}
 	}
+}
+
+// Shutdown gracefully closes all client connections
+func (h *Hub) Shutdown() {
+	h.shutdownMu.Lock()
+	defer h.shutdownMu.Unlock()
+
+	if h.shutdown {
+		return // Already shut down
+	}
+	h.shutdown = true
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Close all client connections
+	for client := range h.clients {
+		close(client.send)
+	}
+	// Clear all maps
+	h.clients = make(map[*Client]bool)
+	h.userClients = make(map[uuid.UUID]*Client)
+	h.rooms = make(map[uuid.UUID]map[*Client]bool)
+	h.typingState = make(map[uuid.UUID]map[uuid.UUID]*TypingState)
 }
 
 // JoinRoom adds a client to a chat room.
@@ -198,6 +250,23 @@ func (h *Hub) BroadcastToChat(msg *BroadcastMessage) {
 	}
 }
 
+// BroadcastToUser sends a message to all clients of a specific user.
+func (h *Hub) BroadcastToUser(userID uuid.UUID, msg *BroadcastMessage) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	client, ok := h.userClients[userID]
+	if !ok {
+		return
+	}
+
+	select {
+	case client.send <- msg:
+	default:
+		log.Printf("[Hub] Send channel full for user %s, dropping message", userID)
+	}
+}
+
 // SetTyping updates typing state for a user in a chat
 func (h *Hub) SetTyping(chatID, userID uuid.UUID, firstName, lastName string, isTyping bool) {
 	h.mu.Lock()
@@ -221,8 +290,9 @@ func (h *Hub) SetTyping(chatID, userID uuid.UUID, firstName, lastName string, is
 		}
 	}
 
-	// Broadcast typing update to room
-	go h.BroadcastToChat(&BroadcastMessage{
+	// Broadcast typing update synchronously to avoid goroutine accumulation
+	// This is safe because typing events are infrequent per user
+	h.BroadcastToChat(&BroadcastMessage{
 		Type:   "typing",
 		ChatID: chatID,
 		Payload: map[string]interface{}{

@@ -102,6 +102,8 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var updates struct {
 		FirstName  string `json:"first_name,omitempty"`
 		LastName   string `json:"last_name,omitempty"`
@@ -167,13 +169,14 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		user.LastName = updates.LastName
 	}
 	if updates.MiddleName != "" {
-		user.MiddleName = strings.TrimSpace(updates.MiddleName)
+		trimmed := strings.TrimSpace(updates.MiddleName)
+		user.MiddleName = &trimmed
 	}
 	if updates.Phone != "" {
 		user.Phone = updates.Phone
 	}
 	if updates.Avatar != "" {
-		user.Avatar = updates.Avatar
+		user.Avatar = &updates.Avatar
 	}
 
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
@@ -303,9 +306,9 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if user.Avatar != "" {
+	if user.Avatar != nil && *user.Avatar != "" {
 		// Extract filename from URL
-		oldFilename := filepath.Base(user.Avatar)
+		oldFilename := filepath.Base(*user.Avatar)
 		oldFilepath := filepath.Join(avatarsDir, oldFilename)
 		if err := os.Remove(oldFilepath); err != nil && !os.IsNotExist(err) {
 			h.logger.Warn("failed to delete old avatar", "error", err)
@@ -322,7 +325,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 
 	avatarURL := "/uploads/avatars/" + filename
 
-	user.Avatar = avatarURL
+	user.Avatar = &avatarURL
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
 		h.logger.Error("failed to update user", "error", err)
 		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update user")
@@ -516,6 +519,8 @@ func (h *Handler) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Limit request body to 64KB to prevent DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req struct {
 		Status       string `json:"status"`
 		CustomStatus string `json:"custom_status"`

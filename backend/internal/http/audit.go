@@ -62,6 +62,7 @@ func AuditMiddleware(storage storage.Storage, logger *slog.Logger) func(stdhttp.
 			// Copy values to avoid data race with request scope
 			userID := claims.UserID
 			actionName := action
+			logCopy := *log // Copy struct by value to avoid data race
 			go func() {
 				// Panic recovery to ensure goroutine always terminates
 				defer func() {
@@ -71,7 +72,7 @@ func AuditMiddleware(storage storage.Storage, logger *slog.Logger) func(stdhttp.
 				}()
 
 				ctx := context.Background()
-				if err := storage.CreateAuditLog(ctx, log); err != nil {
+				if err := storage.CreateAuditLog(ctx, &logCopy); err != nil {
 					logger.Error("failed to create audit log", "error", err, "user_id", userID, "action", actionName)
 				}
 			}()
@@ -176,6 +177,24 @@ func (h *Handler) getAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 
 // getAllAuditLogs returns all audit logs (admin only)
 func (h *Handler) getAllAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	// Defense in depth: verify user is authenticated and has admin role
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Get user to verify admin role (defense in depth)
+	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
+	if err != nil || user == nil {
+		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+	if user.Role != models.UserRoleAdmin {
+		WriteError(w, stdhttp.StatusForbidden, "forbidden", "Admin access required")
+		return
+	}
+
 	// Parse query parameters
 	limit := 100
 	offset := 0

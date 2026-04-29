@@ -1,0 +1,1 @@
+postgres://corpmessenger:corpmessenger_secure_password_2024@postgres:5432/corpmessenger?sslmode=disable

@@ -25,12 +25,16 @@ type Storage interface {
 	MentionStorage
 	ReactionStorage
 	AuditStorage
+	LoginAttemptStorage
 }
 
 type UserStorage interface {
 	CreateUser(ctx context.Context, user *models.User, passwordHash string) error
+	UpdateUserPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
+	DeleteUser(ctx context.Context, userID uuid.UUID) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, string, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error)
+	GetUserByIDWithPassword(ctx context.Context, id uuid.UUID) (*models.User, string, error)
 	GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error)
 	UpdateUser(ctx context.Context, user *models.User) error
 	UpdateUserStatus(ctx context.Context, userID uuid.UUID, status, customStatus string) error
@@ -56,6 +60,10 @@ type ChatStorage interface {
 	UnarchiveChat(ctx context.Context, chatID, userID uuid.UUID) error
 	SoftDeleteChat(ctx context.Context, chatID, userID uuid.UUID) error
 	ClearChatHistory(ctx context.Context, chatID, userID uuid.UUID) error
+	// XMPP reconciliation methods
+	MarkChatForReconciliation(ctx context.Context, chatID uuid.UUID, reason string, details map[string]interface{}) error
+	GetChatsNeedingReconciliation(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	ResolveReconciliation(ctx context.Context, chatID uuid.UUID, reason string) error
 }
 
 type MessageStorage interface {
@@ -76,6 +84,20 @@ type MessageStorage interface {
 	PinMessage(ctx context.Context, chatID, messageID, userID uuid.UUID) error
 	UnpinMessage(ctx context.Context, chatID, messageID uuid.UUID) error
 	GetPinnedMessages(ctx context.Context, chatID uuid.UUID) ([]*models.Message, error)
+	// XMPP sync methods
+	GetUnsyncedMessages(ctx context.Context, limit int) ([]*models.Message, error)
+	MarkMessageAsSyncedToXMPP(ctx context.Context, messageID uuid.UUID, xmppMessageID string) error
+	GetMessageByXMPPID(ctx context.Context, xmppMessageID string) (*models.Message, error)
+	GetScheduledMessages(ctx context.Context) ([]*models.Message, error)
+	GetThreadMessages(ctx context.Context, threadID uuid.UUID, limit, offset int) ([]*models.Message, error)
+	// XMPP sync dead letter queue methods
+	AddToXMPPSyncDeadLetter(ctx context.Context, messageID, chatID uuid.UUID, errorMessage string) error
+	GetXMPPSyncDeadLetters(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	ResolveXMPPSyncDeadLetter(ctx context.Context, messageID uuid.UUID) error
+	// Scheduler failure tracking methods
+	AddToSchedulerFailures(ctx context.Context, messageID, chatID uuid.UUID, errorMessage string) error
+	GetSchedulerFailures(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	ResolveSchedulerFailure(ctx context.Context, messageID uuid.UUID) error
 }
 
 type SessionStorage interface {
@@ -107,6 +129,9 @@ type NotificationStorage interface {
 	GetTotalUnreadCount(ctx context.Context, userID uuid.UUID) (int, error)
 	GetUserLastOnline(ctx context.Context, userID uuid.UUID) (time.Time, error)
 	UpdateUserLastOnline(ctx context.Context, userID uuid.UUID) error
+	CreateWebPushSubscription(ctx context.Context, sub *models.WebPushSubscription) error
+	GetWebPushSubscriptions(ctx context.Context, userID uuid.UUID) ([]*models.WebPushSubscription, error)
+	DeleteWebPushSubscription(ctx context.Context, userID uuid.UUID, endpoint string) error
 }
 
 type EncryptionStorage interface {
@@ -150,11 +175,20 @@ func (s *StubStorage) Close() error                    { return nil }
 func (s *StubStorage) CreateUser(ctx context.Context, user *models.User, passwordHash string) error {
 	return nil
 }
+func (s *StubStorage) UpdateUserPassword(ctx context.Context, userID uuid.UUID, passwordHash string) error {
+	return nil
+}
+func (s *StubStorage) DeleteUser(ctx context.Context, userID uuid.UUID) error {
+	return nil
+}
 func (s *StubStorage) GetUserByEmail(ctx context.Context, email string) (*models.User, string, error) {
 	return nil, "", nil
 }
 func (s *StubStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	return nil, nil
+}
+func (s *StubStorage) GetUserByIDWithPassword(ctx context.Context, id uuid.UUID) (*models.User, string, error) {
+	return nil, "", nil
 }
 func (s *StubStorage) GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error) {
 	return nil, nil
@@ -196,6 +230,15 @@ func (s *StubStorage) ArchiveChat(ctx context.Context, chatID, userID uuid.UUID)
 func (s *StubStorage) UnarchiveChat(ctx context.Context, chatID, userID uuid.UUID) error  { return nil }
 func (s *StubStorage) SoftDeleteChat(ctx context.Context, chatID, userID uuid.UUID) error { return nil }
 func (s *StubStorage) ClearChatHistory(ctx context.Context, chatID, userID uuid.UUID) error {
+	return nil
+}
+func (s *StubStorage) MarkChatForReconciliation(ctx context.Context, chatID uuid.UUID, reason string, details map[string]interface{}) error {
+	return nil
+}
+func (s *StubStorage) GetChatsNeedingReconciliation(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (s *StubStorage) ResolveReconciliation(ctx context.Context, chatID uuid.UUID, reason string) error {
 	return nil
 }
 func (s *StubStorage) CreateMessage(ctx context.Context, msg *models.Message) error { return nil }
@@ -292,6 +335,15 @@ func (s *StubStorage) GetUserLastOnline(ctx context.Context, userID uuid.UUID) (
 	return time.Time{}, nil
 }
 func (s *StubStorage) UpdateUserLastOnline(ctx context.Context, userID uuid.UUID) error { return nil }
+func (s *StubStorage) CreateWebPushSubscription(ctx context.Context, sub *models.WebPushSubscription) error {
+	return nil
+}
+func (s *StubStorage) GetWebPushSubscriptions(ctx context.Context, userID uuid.UUID) ([]*models.WebPushSubscription, error) {
+	return nil, nil
+}
+func (s *StubStorage) DeleteWebPushSubscription(ctx context.Context, userID uuid.UUID, endpoint string) error {
+	return nil
+}
 
 // EncryptionStorage stubs
 func (s *StubStorage) GetUserPublicKey(ctx context.Context, userID uuid.UUID) (*models.EncryptionKey, error) {
@@ -343,6 +395,58 @@ func (s *StubStorage) RemoveReaction(ctx context.Context, messageID, userID uuid
 }
 func (s *StubStorage) GetMessageReactions(ctx context.Context, messageID uuid.UUID) ([]*models.Reaction, error) {
 	return nil, nil
+}
+func (s *StubStorage) GetUnsyncedMessages(ctx context.Context, limit int) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) MarkMessageAsSyncedToXMPP(ctx context.Context, messageID uuid.UUID, xmppMessageID string) error {
+	return nil
+}
+func (s *StubStorage) GetMessageByXMPPID(ctx context.Context, xmppMessageID string) (*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) GetScheduledMessages(ctx context.Context) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) GetThreadMessages(ctx context.Context, threadID uuid.UUID, limit, offset int) ([]*models.Message, error) {
+	return nil, nil
+}
+func (s *StubStorage) AddToXMPPSyncDeadLetter(ctx context.Context, messageID, chatID uuid.UUID, errorMessage string) error {
+	return nil
+}
+func (s *StubStorage) GetXMPPSyncDeadLetters(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (s *StubStorage) ResolveXMPPSyncDeadLetter(ctx context.Context, messageID uuid.UUID) error {
+	return nil
+}
+func (s *StubStorage) AddToSchedulerFailures(ctx context.Context, messageID, chatID uuid.UUID, errorMessage string) error {
+	return nil
+}
+func (s *StubStorage) GetSchedulerFailures(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (s *StubStorage) ResolveSchedulerFailure(ctx context.Context, messageID uuid.UUID) error {
+	return nil
+}
+
+// LoginAttemptStorage handles login attempt tracking for account lockout
+type LoginAttemptStorage interface {
+	RecordLoginAttempt(ctx context.Context, email, ipAddress string, userID *uuid.UUID, success bool) error
+	GetFailedLoginAttempts(ctx context.Context, email string, since time.Time) (int, error)
+	CleanupOldLoginAttempts(ctx context.Context, olderThan time.Time) error
+}
+
+func (s *StubStorage) RecordLoginAttempt(ctx context.Context, email, ipAddress string, userID *uuid.UUID, success bool) error {
+	return nil
+}
+
+func (s *StubStorage) GetFailedLoginAttempts(ctx context.Context, email string, since time.Time) (int, error) {
+	return 0, nil
+}
+
+func (s *StubStorage) CleanupOldLoginAttempts(ctx context.Context, olderThan time.Time) error {
+	return nil
 }
 
 type testEjabberd struct{ err error }

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"corp-messenger/backend/internal/app"
 )
@@ -25,20 +24,24 @@ func main() {
 	defer stop()
 
 	go func() {
-		application.Logger.Info("http server starting", "env", application.Config.AppEnv, "port", application.Config.HTTPPort)
-		if err := application.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			application.Logger.Error("http server failed", "error", err)
-			stop()
+		if application.Config.TLSEnabled {
+			application.Logger.Info("https server starting", "env", application.Config.AppEnv, "port", application.Config.HTTPSPort)
+			if err := application.Server.ListenAndServeTLS(application.Config.TLSCertPath, application.Config.TLSKeyPath); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				application.Logger.Error("https server failed", "error", err)
+				stop()
+			}
+		} else {
+			application.Logger.Info("http server starting", "env", application.Config.AppEnv, "port", application.Config.HTTPPort)
+			if err := application.Server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				application.Logger.Error("http server failed", "error", err)
+				stop()
+			}
 		}
 	}()
 
 	<-ctx.Done()
-	application.Logger.Info("shutdown signal received")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := application.Server.Shutdown(shutdownCtx); err != nil {
-		application.Logger.Error("graceful shutdown failed", "error", err)
-		os.Exit(1)
-	}
-	application.Logger.Info("http server stopped")
+	application.Logger.Info("shutdown signal received, initiating graceful shutdown")
+	// Close() handles server shutdown, including closing all goroutines
+	application.Close()
+	application.Logger.Info("application shutdown complete")
 }

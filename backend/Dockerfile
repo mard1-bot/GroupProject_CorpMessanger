@@ -5,7 +5,7 @@ WORKDIR /app
 COPY go.mod ./
 COPY . ./
 
-RUN go mod download
+ENV GOPROXY=https://proxy.golang.org,direct
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /app/api ./cmd/api
 
 FROM alpine:3.20

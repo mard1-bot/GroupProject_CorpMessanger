@@ -6,17 +6,28 @@ import { callService, type CallState } from '@/services/calls';
 interface IncomingCallProps {
   callState: CallState;
   callerName: string;
+  isGroup?: boolean;
   onAccept: () => void;
   onReject: () => void;
 }
 
-export function IncomingCall({ callState, callerName, onAccept, onReject }: IncomingCallProps) {
+export function IncomingCall({ callState, callerName, isGroup, onAccept, onReject }: IncomingCallProps) {
+  const handleAcceptPress = () => {
+    console.log('Accept button pressed');
+    onAccept();
+  };
+
+  const handleRejectPress = () => {
+    console.log('Reject button pressed');
+    onReject();
+  };
+
   return (
     <Modal visible={true} transparent animationType="slide">
       <View style={styles.overlay}>
         <View style={styles.container}>
           <View style={styles.avatar}>
-            <MaterialIcons name="person" size={80} color="#666" />
+            <MaterialIcons name={isGroup ? 'group' : 'person'} size={80} color="#666" />
           </View>
           
           <Text style={styles.callerName}>{callerName}</Text>
@@ -28,18 +39,22 @@ export function IncomingCall({ callState, callerName, onAccept, onReject }: Inco
           <View style={styles.buttons}>
             <TouchableOpacity 
               style={[styles.button, styles.rejectButton]}
-              onPress={onReject}
+              onPress={handleRejectPress}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <MaterialIcons name="call-end" size={32} color="#fff" />
-              <Text style={styles.buttonText}>Отклонить</Text>
+              <Text style={styles.buttonText} numberOfLines={1}>Отклонить</Text>
             </TouchableOpacity>
 
             <TouchableOpacity 
               style={[styles.button, styles.acceptButton]}
-              onPress={onAccept}
+              onPress={handleAcceptPress}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <MaterialIcons name="call" size={32} color="#fff" />
-              <Text style={styles.buttonText}>Ответить</Text>
+              <Text style={styles.buttonText} numberOfLines={1}>Ответить</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -93,23 +108,26 @@ const styles = StyleSheet.create({
   button: {
     alignItems: 'center',
     gap: 8,
+    minWidth: 80,
+    minHeight: 80,
+    justifyContent: 'center',
   },
   buttonText: {
     color: '#fff',
     fontSize: 14,
   },
   rejectButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: '#e53935',
     justifyContent: 'center',
     alignItems: 'center',
   },
   acceptButton: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
+    width: 80,
+    height: 80,
+    borderRadius: 40,
     backgroundColor: '#43a047',
     justifyContent: 'center',
     alignItems: 'center',
