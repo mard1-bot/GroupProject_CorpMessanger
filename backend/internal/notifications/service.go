@@ -2,9 +2,12 @@ package notifications
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
+	"net/http"
 	"net/smtp"
 	"os"
 	"strconv"
@@ -13,13 +16,14 @@ import (
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/storage"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/google/uuid"
 )
 
 type Service struct {
 	logger          *slog.Logger
 	storage         storage.Storage
-	fcm             *FCMClient
+	fcm             *FCMClientV1
 	smtpHost        string
 	smtpPort        int
 	smtpUser        string
@@ -29,9 +33,14 @@ type Service struct {
 }
 
 func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) {
-	fcm := NewFCMClient()
-	if !fcm.IsConfigured() {
-		logger.Warn("FCM not configured, push notifications disabled")
+	logger.Info("Initializing FCM v1 client")
+	fcm, err := NewFCMClientV1()
+	if err != nil {
+		logger.Warn("FCM v1 not configured, push notifications disabled", "error", err)
+		fcm = nil
+		// Don't return error - FCM is optional
+	} else {
+		logger.Info("FCM v1 configured successfully")
 	}
 
 	// Email config from env
@@ -137,71 +146,77 @@ func (s *Service) sendPush(ctx context.Context, userID uuid.UUID, payload *Notif
 	}
 
 	// Send Web Push notifications
-	// TODO: Uncomment after fixing webpush-go import
-	// if s.vapidPublicKey != "" && s.vapidPrivateKey != "" {
-	// 	if err := s.sendWebPush(ctx, userID, payload); err != nil {
-	// 		s.logger.Error("web push send failed", "error", err, "user_id", userID)
-	// 	}
-	// }
+	if s.vapidPublicKey != "" && s.vapidPrivateKey != "" {
+		if err := s.sendWebPush(ctx, userID, payload); err != nil {
+			s.logger.Error("web push send failed", "error", err, "user_id", userID)
+		}
+	}
 
 	return nil
 }
 
-// func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
-// 	subs, err := s.storage.GetWebPushSubscriptions(ctx, userID)
-// 	if err != nil {
-// 		return fmt.Errorf("get web push subscriptions: %w", err)
-// 	}
+func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
+	subs, err := s.storage.GetWebPushSubscriptions(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("get web push subscriptions: %w", err)
+	}
 
-// 	for _, sub := range subs {
-// 		// Decode base64 keys
-// 		key, err := base64.RawURLEncoding.DecodeString(sub.Key)
-// 		if err != nil {
-// 			s.logger.Error("decode web push key", "error", err)
-// 			continue
-// 		}
+	for _, sub := range subs {
+		// Decode base64 keys (client sends standard base64 with btoa())
+		key, err := base64.StdEncoding.DecodeString(sub.Key)
+		if err != nil {
+			s.logger.Error("decode web push key", "error", err)
+			continue
+		}
 
-// 		auth, err := base64.RawURLEncoding.DecodeString(sub.Auth)
-// 		if err != nil {
-// 			s.logger.Error("decode web push auth", "error", err)
-// 			continue
-// 		}
+		auth, err := base64.StdEncoding.DecodeString(sub.Auth)
+		if err != nil {
+			s.logger.Error("decode web push auth", "error", err)
+			continue
+		}
 
-// 		// Create webpush subscription
-// 		webpushSub := &webpush.Subscription{
-// 			Endpoint: sub.Endpoint,
-// 			Keys: webpush.Keys{
-// 				P256DH: string(key),
-// 				Auth:   string(auth),
-// 			},
-// 		}
+		// Create webpush subscription
+		webpushSub := &webpush.Subscription{
+			Endpoint: sub.Endpoint,
+			Keys: webpush.Keys{
+				P256dh: string(key),
+				Auth:   string(auth),
+			},
+		}
 
-// 		// Create notification payload
-// 		notificationPayload := &webpush.Message{
-// 			Title: payload.Title,
-// 			Body:  payload.Body,
-// 			Data:  payload.Data,
-// 		}
+		// Create notification payload
+		notificationPayload := map[string]interface{}{
+			"title": payload.Title,
+			"body":  payload.Body,
+			"data":  payload.Data,
+		}
 
-// 		// Send notification
-// 		resp, err := webpush.SendNotification(webpushSub, notificationPayload, &webpush.Options{
-// 			Subscriber:      s.vapidPublicKey,
-// 			VAPIDPrivateKey: s.vapidPrivateKey,
-// 			TTL:             3600,
-// 		})
+		// Convert to JSON bytes
+		messageBytes, err := json.Marshal(notificationPayload)
+		if err != nil {
+			s.logger.Error("failed to marshal webpush payload", "error", err)
+			continue
+		}
 
-// 		if err != nil {
-// 			s.logger.Error("webpush send failed", "error", err, "endpoint", sub.Endpoint)
-// 			continue
-// 		}
+		// Send notification
+		resp, err := webpush.SendNotification(messageBytes, webpushSub, &webpush.Options{
+			Subscriber:      s.vapidPublicKey,
+			VAPIDPrivateKey: s.vapidPrivateKey,
+			TTL:             3600,
+		})
 
-// 		if resp.StatusCode() != http.StatusCreated && resp.StatusCode() != http.StatusOK {
-// 			s.logger.Warn("webpush returned non-success status", "status", resp.StatusCode())
-// 		}
-// 	}
+		if err != nil {
+			s.logger.Error("webpush send failed", "error", err, "endpoint", sub.Endpoint)
+			continue
+		}
 
-// 	return nil
-// }
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			s.logger.Warn("webpush returned non-success status", "status", resp.StatusCode)
+		}
+	}
+
+	return nil
+}
 
 func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
 	if s.smtpHost == "" || s.smtpUser == "" {

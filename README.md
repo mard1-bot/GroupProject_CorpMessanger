@@ -143,7 +143,112 @@
 
 ```text
 GroupProject_CorpMessanger/
-├── client/   # frontend на React Native
-├── backend/  # backend на Go
+├── client/          # React Native frontend
+├── backend/         # Go backend
+│   ├── cmd/         # CLI utilities
+│   ├── internal/    # Application logic
+│   ├── migrations/  # Database migrations
+│   └── .env.example # Environment variables template
+├── docs/            # Documentation
 └── README.md
+```
 
+## Быстрый старт
+
+### Требования
+
+- Docker и Docker Compose
+- Node.js 18+ (для разработки frontend)
+- Go 1.21+ (для разработки backend)
+
+### Установка
+
+1. **Клонируйте репозиторий**
+   ```bash
+   git clone https://github.com/mard1-bot/GroupProject_CorpMessanger.git
+   cd GroupProject_CorpMessanger
+   ```
+
+2. **Настройте переменные окружения**
+   ```bash
+   cp backend/.env.example backend/.env
+   cp client/.env.example client/.env
+   # Отредактируйте backend/.env и client/.env с вашими значениями
+   ```
+
+3. **Настройте TURN сервер для WebRTC (обязательно для звонков)**
+   - Установите `TURN_EXTERNAL_IP` в `backend/.env` (ваш публичный IP или localhost для dev)
+   - Установите `TURN_USERNAME` и `TURN_PASSWORD` в `backend/.env`
+   - В `client/.env` установите те же значения для `EXPO_PUBLIC_TURN_*`
+
+4. **Запустите через Docker Compose**
+   ```bash
+   docker-compose up -d
+   ```
+
+5. **Установите пароль администратора**
+   ```bash
+   cd backend/cmd/setadminpass
+   go run main.go "YourSecurePassword123!"
+   ```
+
+6. **Запустите клиент (для разработки)**
+   ```bash
+   cd client
+   npm install
+   npm start
+   ```
+
+### Доступ
+
+- **Backend API:** http://localhost:8080
+- **Frontend:** http://localhost:19006 (Expo)
+- **PostgreSQL:** localhost:5432
+- **TURN Server:** localhost:3478
+
+### Настройка HTTPS (для production)
+
+WebRTC требует HTTPS в production. Для включения:
+
+1. **Сгенерируйте сертификаты**
+   ```bash
+   mkdir -p certs
+   openssl req -x509 -newkey rsa:4096 -keyout certs/server.key -out certs/server.crt -days 365 -nodes
+   ```
+
+2. **Включите TLS в backend/.env**
+   ```
+   TLS_ENABLED=true
+   TLS_CERT_PATH=/app/certs/server.crt
+   TLS_KEY_PATH=/app/certs/server.key
+   ```
+
+3. **Перезапустите docker-compose**
+   ```bash
+   docker-compose down
+   docker-compose up -d
+   ```
+
+### Групповые звонки (LiveKit)
+
+Для групповых звонков включите LiveKit:
+```bash
+docker-compose --profile with-livekit up -d
+```
+
+### Без LiveKit
+
+P2P звонки работают без LiveKit через TURN сервер. Для минимальной конфигурации:
+```bash
+docker-compose up -d  # без LiveKit
+```
+
+## Документация
+
+- [WebRTC и XMPP настройка](docs/WEBRTC_XMPP_SETUP.md)
+- [FCM v1 миграция](docs/FCM_V1_MIGRATION.md)
+- [Безопасность](README_SECURITY.md)
+
+## Лицензия
+
+MIT License - см. файл [LICENSE](LICENSE)

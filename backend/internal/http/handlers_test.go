@@ -35,6 +35,9 @@ func (s testStorage) GetUserByEmail(ctx context.Context, email string) (*models.
 func (s testStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
 	return nil, nil
 }
+func (s testStorage) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	return nil, nil
+}
 func (s testStorage) GetUserByIDWithPassword(ctx context.Context, id uuid.UUID) (*models.User, string, error) {
 	return nil, "", nil
 }
@@ -104,10 +107,10 @@ func (s testStorage) GetMessagesByChatForUser(ctx context.Context, chatID, userI
 func (s testStorage) GetAllMessagesByChat(ctx context.Context, chatID uuid.UUID) ([]*models.Message, error) {
 	return nil, nil
 }
-func (s testStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+func (s testStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }
-func (s testStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+func (s testStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }
 func (s testStorage) UpdateMessage(ctx context.Context, msg *models.Message) error { return nil }
@@ -160,6 +163,9 @@ func (s testStorage) GetAuditLogs(ctx context.Context, userID uuid.UUID, limit, 
 func (s testStorage) GetAllAuditLogs(ctx context.Context, limit, offset int) ([]*models.AuditLog, error) {
 	return nil, nil
 }
+func (s testStorage) DeleteAuditLogs(ctx context.Context, beforeDate *time.Time) (int64, error) {
+	return 0, nil
+}
 func (s testStorage) CreateDeviceToken(ctx context.Context, token *models.DeviceToken) error {
 	return nil
 }
@@ -191,6 +197,12 @@ func (s testStorage) GetUsersPublicKeys(ctx context.Context, userIDs []uuid.UUID
 }
 func (s testStorage) SaveUserPublicKey(ctx context.Context, key *models.EncryptionKey) error {
 	return nil
+}
+func (s testStorage) RotateEncryptionKey(ctx context.Context, userID uuid.UUID, newPublicKey, newPrivateKey, reason string) (int, error) {
+	return 1, nil
+}
+func (s testStorage) GetEncryptionKeyByVersion(ctx context.Context, userID uuid.UUID, version int) (*models.EncryptionKey, error) {
+	return nil, nil
 }
 func (s testStorage) AddBookmark(ctx context.Context, userID, messageID uuid.UUID) error {
 	return nil
@@ -280,6 +292,53 @@ func (s testStorage) CleanupOldLoginAttempts(ctx context.Context, olderThan time
 	return nil
 }
 
+func (s testStorage) CreateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	return nil
+}
+func (s testStorage) GetTwoFactorSettings(ctx context.Context, userID uuid.UUID) (*models.TwoFactorSettings, error) {
+	return nil, nil
+}
+func (s testStorage) UpdateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	return nil
+}
+func (s testStorage) DeleteTwoFactorSettings(ctx context.Context, userID uuid.UUID) error {
+	return nil
+}
+func (s testStorage) VerifyUserPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	return nil
+}
+
+func (s testStorage) UpdateUserRole(ctx context.Context, userID uuid.UUID, role string) error {
+	return nil
+}
+
+func (s testStorage) DeleteAllUserSessions(ctx context.Context, userID uuid.UUID) error {
+	return nil
+}
+
+func (s testStorage) GetAdminStats(ctx context.Context) (*models.AdminStats, error) {
+	return &models.AdminStats{}, nil
+}
+
+func (s testStorage) SaveUserConsent(ctx context.Context, consent *models.UserConsent) error {
+	return nil
+}
+func (s testStorage) GetUserConsents(ctx context.Context, userID uuid.UUID) ([]*models.UserConsent, error) {
+	return nil, nil
+}
+func (s testStorage) HasValidConsent(ctx context.Context, userID uuid.UUID, consentType string) (bool, error) {
+	return false, nil
+}
+func (s testStorage) CreateDataExportRequest(ctx context.Context, request *models.DataExportRequest) error {
+	return nil
+}
+func (s testStorage) GetDataExportRequests(ctx context.Context, userID uuid.UUID) ([]*models.DataExportRequest, error) {
+	return nil, nil
+}
+func (s testStorage) AnonymizeUserData(ctx context.Context, userID uuid.UUID) (map[string]interface{}, error) {
+	return make(map[string]interface{}), nil
+}
+
 type testEjabberd struct{ err error }
 
 func (e testEjabberd) Ready(context.Context) error                        { return e.err }
@@ -302,7 +361,7 @@ func TestHealth(t *testing.T) {
 	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "")
 	go hub.Run(context.Background())
 	lk := livekit.NewService("", "", "")
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk)
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/health", nil)
 	h.ServeHTTP(rr, req)
@@ -314,7 +373,7 @@ func TestReady(t *testing.T) {
 	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "")
 	go hub.Run(context.Background())
 	lk := livekit.NewService("", "", "")
-	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk)
+	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk, "")
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/ready", nil)
 	h.ServeHTTP(rr, req)
@@ -375,19 +434,58 @@ func TestGetClientIP(t *testing.T) {
 }
 
 func TestTrackFailedLoginAttempt(t *testing.T) {
-	// Test tracking failed login attempts
-	trackFailedLoginAttempt("test@example.com", "192.168.1.1")
+	// Create a handler with test storage that tracks attempts
+	logger := slog.Default()
+	storage := &trackingTestStorage{attempts: make(map[string]int)}
+	handler := &Handler{
+		logger:  logger,
+		storage: storage,
+	}
+	ctx := context.Background()
 
-	if !isAccountLocked("test@example.com") {
-		// Should not be locked after 1 attempt
+	// Test tracking failed login attempts
+	err := handler.trackFailedLoginAttempt(ctx, "test@example.com", "192.168.1.1")
+	if err != nil {
+		t.Errorf("trackFailedLoginAttempt failed: %v", err)
+	}
+
+	locked, err := handler.isAccountLocked(ctx, "test@example.com")
+	if err != nil {
+		t.Errorf("isAccountLocked failed: %v", err)
+	}
+	if locked {
+		t.Error("account should not be locked after 1 attempt")
 	}
 
 	// Add more attempts
 	for i := 0; i < 5; i++ {
-		trackFailedLoginAttempt("test@example.com", "192.168.1.1")
+		err := handler.trackFailedLoginAttempt(ctx, "test@example.com", "192.168.1.1")
+		if err != nil {
+			t.Errorf("trackFailedLoginAttempt failed: %v", err)
+		}
 	}
 
-	if !isAccountLocked("test@example.com") {
+	locked, err = handler.isAccountLocked(ctx, "test@example.com")
+	if err != nil {
+		t.Errorf("isAccountLocked failed: %v", err)
+	}
+	if !locked {
 		t.Error("expected account to be locked after 5 failed attempts")
 	}
+}
+
+type trackingTestStorage struct {
+	testStorage
+	attempts map[string]int
+}
+
+func (s *trackingTestStorage) RecordLoginAttempt(ctx context.Context, email, ipAddress string, userID *uuid.UUID, success bool) error {
+	if !success {
+		s.attempts[email]++
+	}
+	return nil
+}
+
+func (s *trackingTestStorage) GetFailedLoginAttempts(ctx context.Context, email string, since time.Time) (int, error) {
+	return s.attempts[email], nil
 }

@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"corp-messenger/backend/internal/auth"
+	"corp-messenger/backend/internal/crypto"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/websocket"
 
@@ -40,14 +42,14 @@ type ReplyMessageRequest struct {
 func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
@@ -55,14 +57,14 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 	var req SendMessageRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	trimmedContent := strings.TrimSpace(req.Content)
 	if trimmedContent == "" && req.EncryptedContent == "" {
-		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required (cannot be empty or only whitespace)")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_content", "Message content is required (cannot be empty or only whitespace)")
 		return
 	}
 	req.Content = trimmedContent
@@ -70,7 +72,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -82,7 +84,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -92,11 +94,11 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			blocked, err := h.storage.IsUserBlocked(r.Context(), m.UserID, claims.UserID)
 			if err != nil {
 				h.logger.Error("failed to check blocking status", "error", err)
-				WriteError(w, http.StatusInternalServerError, "internal", "Failed to check blocking status")
+				WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check blocking status")
 				return
 			}
 			if blocked {
-				WriteError(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
+				WriteErrorCode(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
 				return
 			}
 		}
@@ -116,29 +118,29 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		models.MessageTypeVideo: true,
 	}
 	if !validTypes[msgType] {
-		WriteError(w, http.StatusBadRequest, "invalid_type", "Invalid message type")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_type", "Invalid message type")
 		return
 	}
 
 	// Validate message content size (prevent DoS)
 	const maxMessageContentSize = 10000 // 10KB
 	if len(req.Content) > maxMessageContentSize {
-		WriteError(w, http.StatusBadRequest, "content_too_large", "Message content exceeds maximum size (10KB)")
+		WriteErrorCode(w, http.StatusBadRequest, "content_too_large", "Message content exceeds maximum size (10KB)")
 		return
 	}
 
 	// Validate encrypted keys size (prevent DoS)
 	if len(req.EncryptedKeys) > 100 {
-		WriteError(w, http.StatusBadRequest, "too_many_keys", "Too many encrypted keys (max 100)")
+		WriteErrorCode(w, http.StatusBadRequest, "too_many_keys", "Too many encrypted keys (max 100)")
 		return
 	}
 	for userID, key := range req.EncryptedKeys {
 		if _, err := uuid.Parse(userID); err != nil {
-			WriteError(w, http.StatusBadRequest, "invalid_user_id", "Invalid user ID in encrypted keys")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_user_id", "Invalid user ID in encrypted keys")
 			return
 		}
 		if len(key) > 10000 {
-			WriteError(w, http.StatusBadRequest, "key_too_large", "Encrypted key exceeds maximum size (10KB)")
+			WriteErrorCode(w, http.StatusBadRequest, "key_too_large", "Encrypted key exceeds maximum size (10KB)")
 			return
 		}
 	}
@@ -146,7 +148,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// Validate duration if provided
 	if req.Duration != nil {
 		if *req.Duration < 0 || *req.Duration > 3600 {
-			WriteError(w, http.StatusBadRequest, "invalid_duration", "Duration must be between 0 and 3600 seconds (1 hour)")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_duration", "Duration must be between 0 and 3600 seconds (1 hour)")
 			return
 		}
 	}
@@ -158,15 +160,15 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	// Validate location if provided
 	if req.Location != nil {
 		if req.Location.Latitude < -90 || req.Location.Latitude > 90 {
-			WriteError(w, http.StatusBadRequest, "invalid_latitude", "Latitude must be between -90 and 90")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_latitude", "Latitude must be between -90 and 90")
 			return
 		}
 		if req.Location.Longitude < -180 || req.Location.Longitude > 180 {
-			WriteError(w, http.StatusBadRequest, "invalid_longitude", "Longitude must be between -180 and 180")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_longitude", "Longitude must be between -180 and 180")
 			return
 		}
 		if len(req.Location.Address) > 500 {
-			WriteError(w, http.StatusBadRequest, "address_too_large", "Address exceeds maximum size (500 characters)")
+			WriteErrorCode(w, http.StatusBadRequest, "address_too_large", "Address exceeds maximum size (500 characters)")
 			return
 		}
 	}
@@ -175,7 +177,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		// Validate encrypted content is not empty after trimming
 		trimmedEncrypted := strings.TrimSpace(req.EncryptedContent)
 		if trimmedEncrypted == "" {
-			WriteError(w, http.StatusBadRequest, "invalid_encrypted_content", "Encrypted content cannot be empty")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_encrypted_content", "Encrypted content cannot be empty")
 			return
 		}
 		req.EncryptedContent = trimmedEncrypted
@@ -183,26 +185,26 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		// Validate encrypted content size (prevent DoS)
 		const maxEncryptedContentSize = 1024 * 1024 // 1MB
 		if len(req.EncryptedContent) > maxEncryptedContentSize {
-			WriteError(w, http.StatusBadRequest, "encrypted_content_too_large", "Encrypted content exceeds maximum size (1MB)")
+			WriteErrorCode(w, http.StatusBadRequest, "encrypted_content_too_large", "Encrypted content exceeds maximum size (1MB)")
 			return
 		}
 
 		// Validate IV is provided when encrypted content is present
 		if req.IV == "" {
-			WriteError(w, http.StatusBadRequest, "missing_iv", "IV (Initialization Vector) is required when using encrypted content")
+			WriteErrorCode(w, http.StatusBadRequest, "missing_iv", "IV (Initialization Vector) is required when using encrypted content")
 			return
 		}
 
 		// Validate IV is valid base64
 		decodedIV, err := base64.StdEncoding.DecodeString(req.IV)
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, "invalid_iv", "IV must be valid base64")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_iv", "IV must be valid base64")
 			return
 		}
 
 		// IV should be 12 or 16 bytes for AES-GCM (common sizes)
 		if len(decodedIV) != 12 && len(decodedIV) != 16 {
-			WriteError(w, http.StatusBadRequest, "invalid_iv_length", "IV must be 12 or 16 bytes (AES-GCM)")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_iv_length", "IV must be 12 or 16 bytes (AES-GCM)")
 			return
 		}
 	}
@@ -222,22 +224,22 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if req.ReplyTo != "" {
 		replyToID, err := uuid.Parse(req.ReplyTo)
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, "invalid_reply_to", "Invalid reply_to message ID")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_reply_to", "Invalid reply_to message ID")
 			return
 		}
 		// Verify the replied-to message exists in the same chat
 		replyMsg, err := h.storage.GetMessageByID(r.Context(), replyToID)
 		if err != nil {
 			h.logger.Error("failed to get reply message", "error", err)
-			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate reply_to")
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate reply_to")
 			return
 		}
 		if replyMsg == nil {
-			WriteError(w, http.StatusBadRequest, "reply_not_found", "Reply-to message not found")
+			WriteErrorCode(w, http.StatusBadRequest, "reply_not_found", "Reply-to message not found")
 			return
 		}
 		if replyMsg.ChatID != chatID {
-			WriteError(w, http.StatusBadRequest, "reply_wrong_chat", "Reply-to message is not in this chat")
+			WriteErrorCode(w, http.StatusBadRequest, "reply_wrong_chat", "Reply-to message is not in this chat")
 			return
 		}
 		msg.ReplyTo = &replyToID
@@ -255,29 +257,29 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 	if req.ThreadID != "" {
 		threadID, err := uuid.Parse(req.ThreadID)
 		if err != nil {
-			WriteError(w, http.StatusBadRequest, "invalid_thread_id", "Invalid thread_id")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_thread_id", "Invalid thread_id")
 			return
 		}
 		// Verify the thread message exists
 		threadMsg, err := h.storage.GetMessageByID(r.Context(), threadID)
 		if err != nil {
 			h.logger.Error("failed to get thread message", "error", err)
-			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
 			return
 		}
 		if threadMsg == nil {
-			WriteError(w, http.StatusBadRequest, "thread_not_found", "Thread message not found")
+			WriteErrorCode(w, http.StatusBadRequest, "thread_not_found", "Thread message not found")
 			return
 		}
 		// Verify user is a member of the chat where the thread exists
 		member, err := h.storage.GetChatMember(r.Context(), threadMsg.ChatID, claims.UserID)
 		if err != nil {
 			h.logger.Error("failed to check chat membership", "error", err)
-			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
 			return
 		}
 		if member == nil {
-			WriteError(w, http.StatusForbidden, "not_in_chat", "You don't have access to this thread")
+			WriteErrorCode(w, http.StatusForbidden, "not_in_chat", "You don't have access to this thread")
 			return
 		}
 		msg.ThreadID = &threadID
@@ -285,8 +287,32 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.CreateMessage(r.Context(), msg); err != nil {
 		h.logger.Error("failed to create message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to send message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to send message")
 		return
+	}
+
+	// Parse @username mentions and create mention records
+	if req.Content != "" {
+		mentionRegex := regexp.MustCompile(`@(\w{3,50})`)
+		matches := mentionRegex.FindAllStringSubmatch(req.Content, -1)
+		seen := make(map[string]bool)
+		for _, match := range matches {
+			username := match[1]
+			if seen[username] {
+				continue
+			}
+			seen[username] = true
+			mentionedUser, err := h.storage.GetUserByUsername(r.Context(), username)
+			if err != nil {
+				h.logger.Error("failed to lookup mentioned user", "username", username, "error", err)
+				continue
+			}
+			if mentionedUser != nil {
+				if err := h.storage.AddMention(r.Context(), msg.ID, mentionedUser.ID); err != nil {
+					h.logger.Error("failed to add mention", "error", err)
+				}
+			}
+		}
 	}
 
 	// Broadcast message via WebSocket for realtime delivery
@@ -308,11 +334,9 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			ExcludeSender: &claims.UserID,
 		})
 
-		// Broadcast chat list update to all members (synchronous chat list update)
+		// Broadcast chat list update to all members (including sender for chat list sync)
 		for _, member := range members {
-			if member.UserID == claims.UserID {
-				continue // Skip sender to avoid duplication
-			}
+			h.logger.Info("Broadcasting chat_updated to user", "user_id", member.UserID, "chat_id", chatID)
 			h.hub.BroadcastToUser(member.UserID, &websocket.BroadcastMessage{
 				Type:   "chat_updated",
 				ChatID: chatID,
@@ -353,6 +377,7 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	// Send push notifications to offline users
 	if h.notificationSvc != nil {
+		h.logger.Info("Sending notifications for message", "message_id", msg.ID, "chat_id", msg.ChatID)
 		// Capture values to avoid data race with request scope
 		senderID := claims.UserID
 		msgCopy := *msg // Copy message to avoid race with potential future modifications
@@ -374,8 +399,11 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 			if sender != nil {
 				senderName = sender.FirstName + " " + sender.LastName
 			}
+			h.logger.Info("Calling notifyMessageReceived", "sender_name", senderName)
 			h.notifyMessageReceived(ctx, &msgCopy, senderName)
 		}(senderID, msgCopy)
+	} else {
+		h.logger.Warn("Notification service is nil, skipping notifications")
 	}
 
 	WriteJSON(w, http.StatusCreated, msg)
@@ -384,21 +412,21 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -410,7 +438,7 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -431,7 +459,7 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 	messages, err := h.storage.GetMessagesByChatForUser(r.Context(), chatID, claims.UserID, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to get messages", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get messages")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get messages")
 		return
 	}
 
@@ -505,14 +533,14 @@ func (h *Handler) getChatMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
@@ -520,7 +548,7 @@ func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -532,14 +560,34 @@ func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
 	// Get search query
 	query := r.URL.Query().Get("q")
-	if query == "" {
-		WriteError(w, http.StatusBadRequest, "missing_query", "Search query is required")
+
+	// Optional filters
+	var senderID *uuid.UUID
+	if senderStr := r.URL.Query().Get("sender_id"); senderStr != "" {
+		if sid, err := uuid.Parse(senderStr); err == nil {
+			senderID = &sid
+		}
+	}
+	var dateFrom, dateTo *time.Time
+	if dfStr := r.URL.Query().Get("date_from"); dfStr != "" {
+		if t, err := time.Parse(time.RFC3339, dfStr); err == nil {
+			dateFrom = &t
+		}
+	}
+	if dtStr := r.URL.Query().Get("date_to"); dtStr != "" {
+		if t, err := time.Parse(time.RFC3339, dtStr); err == nil {
+			dateTo = &t
+		}
+	}
+
+	if query == "" && senderID == nil && dateFrom == nil && dateTo == nil {
+		WriteErrorCode(w, http.StatusBadRequest, "missing_query", "At least one of: q, sender_id, date_from, date_to is required")
 		return
 	}
 
@@ -557,10 +605,10 @@ func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages, err := h.storage.SearchMessages(r.Context(), chatID, query, limit, offset)
+	messages, err := h.storage.SearchMessages(r.Context(), chatID, query, senderID, dateFrom, dateTo, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to search messages", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to search messages")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to search messages")
 		return
 	}
 
@@ -570,13 +618,33 @@ func (h *Handler) searchMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) searchAllMessages(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	query := r.URL.Query().Get("q")
-	if query == "" {
-		WriteError(w, http.StatusBadRequest, "missing_query", "Query parameter 'q' is required")
+
+	// Optional filters
+	var senderIDAll *uuid.UUID
+	if senderStr := r.URL.Query().Get("sender_id"); senderStr != "" {
+		if sid, err := uuid.Parse(senderStr); err == nil {
+			senderIDAll = &sid
+		}
+	}
+	var dateFromAll, dateToAll *time.Time
+	if dfStr := r.URL.Query().Get("date_from"); dfStr != "" {
+		if t, err := time.Parse(time.RFC3339, dfStr); err == nil {
+			dateFromAll = &t
+		}
+	}
+	if dtStr := r.URL.Query().Get("date_to"); dtStr != "" {
+		if t, err := time.Parse(time.RFC3339, dtStr); err == nil {
+			dateToAll = &t
+		}
+	}
+
+	if query == "" && senderIDAll == nil && dateFromAll == nil && dateToAll == nil {
+		WriteErrorCode(w, http.StatusBadRequest, "missing_query", "At least one of: q, sender_id, date_from, date_to is required")
 		return
 	}
 
@@ -596,10 +664,10 @@ func (h *Handler) searchAllMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages, err := h.storage.SearchAllMessages(r.Context(), claims.UserID, query, limit, offset)
+	messages, err := h.storage.SearchAllMessages(r.Context(), claims.UserID, query, senderIDAll, dateFromAll, dateToAll, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to search all messages", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to search messages")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to search messages")
 		return
 	}
 
@@ -609,7 +677,7 @@ func (h *Handler) searchAllMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getUserMentions(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -632,7 +700,7 @@ func (h *Handler) getUserMentions(w http.ResponseWriter, r *http.Request) {
 	mentions, err := h.storage.GetUserMentions(r.Context(), claims.UserID, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to get mentions", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get mentions")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get mentions")
 		return
 	}
 
@@ -642,7 +710,7 @@ func (h *Handler) getUserMentions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -653,20 +721,20 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 		Emoji     string `json:"emoji"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	messageID, err := uuid.Parse(req.MessageID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
 	// Validate emoji - must be a valid emoji character
 	if req.Emoji == "" {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Emoji is required")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Emoji is required")
 		return
 	}
 
@@ -675,7 +743,7 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 	// Also check for common emoji ranges and multi-byte UTF-8 sequences
 	emoji := []rune(req.Emoji)
 	if len(emoji) == 0 || len(emoji) > 4 {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji format")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji format")
 		return
 	}
 
@@ -696,7 +764,7 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !hasValidEmoji {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji character")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji character")
 		return
 	}
 
@@ -733,7 +801,7 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.AddReaction(r.Context(), messageID, claims.UserID, req.Emoji); err != nil {
 		h.logger.Error("failed to add reaction", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to add reaction")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to add reaction")
 		return
 	}
 
@@ -773,7 +841,7 @@ func (h *Handler) addReaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) removeReaction(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -784,27 +852,27 @@ func (h *Handler) removeReaction(w http.ResponseWriter, r *http.Request) {
 		Emoji     string `json:"emoji"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	messageID, err := uuid.Parse(req.MessageID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
 	// Validate emoji - must be a valid emoji character
 	if req.Emoji == "" {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Emoji is required")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Emoji is required")
 		return
 	}
 
 	// Check if emoji is a valid single emoji character (basic validation)
 	emoji := []rune(req.Emoji)
 	if len(emoji) == 0 || len(emoji) > 4 {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji format")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji format")
 		return
 	}
 
@@ -824,13 +892,13 @@ func (h *Handler) removeReaction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !hasValidEmoji {
-		WriteError(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji character")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_emoji", "Invalid emoji character")
 		return
 	}
 
 	if err := h.storage.RemoveReaction(r.Context(), messageID, claims.UserID, req.Emoji); err != nil {
 		h.logger.Error("failed to remove reaction", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to remove reaction")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to remove reaction")
 		return
 	}
 
@@ -859,14 +927,14 @@ func (h *Handler) removeReaction(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getMessageReactions(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "id")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
 		return
 	}
 
@@ -874,7 +942,7 @@ func (h *Handler) getMessageReactions(w http.ResponseWriter, r *http.Request) {
 	message, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -882,7 +950,7 @@ func (h *Handler) getMessageReactions(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), message.ChatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -894,14 +962,14 @@ func (h *Handler) getMessageReactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
 	reactions, err := h.storage.GetMessageReactions(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get reactions", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get reactions")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get reactions")
 		return
 	}
 
@@ -911,7 +979,7 @@ func (h *Handler) getMessageReactions(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -921,7 +989,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 		ChatID string `json:"chat_id"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
@@ -929,13 +997,13 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	messageIDStr := chi.URLParam(r, "id")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
 	chatID, err := uuid.Parse(req.ChatID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid target chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid target chat ID")
 		return
 	}
 
@@ -943,11 +1011,11 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	originalMsg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if originalMsg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -955,12 +1023,12 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	originalSender, err := h.storage.GetUserByID(r.Context(), originalMsg.SenderID)
 	if err != nil {
 		h.logger.Error("failed to get original sender", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get original sender info")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get original sender info")
 		return
 	}
 	if originalSender == nil {
 		h.logger.Error("original sender not found", "sender_id", originalMsg.SenderID)
-		WriteError(w, http.StatusNotFound, "sender_not_found", "Original sender not found")
+		WriteErrorCode(w, http.StatusNotFound, "sender_not_found", "Original sender not found")
 		return
 	}
 	var originalSenderName string
@@ -976,7 +1044,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	sourceMembers, err := h.storage.GetChatMembers(r.Context(), originalMsg.ChatID)
 	if err != nil {
 		h.logger.Error("failed to get source chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify source chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify source chat membership")
 		return
 	}
 
@@ -988,7 +1056,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isSourceMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of the source chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of the source chat")
 		return
 	}
 
@@ -996,7 +1064,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -1008,7 +1076,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -1031,7 +1099,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.CreateMessage(r.Context(), forwardedMsg); err != nil {
 		h.logger.Error("failed to create forwarded message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to forward message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to forward message")
 		return
 	}
 
@@ -1059,7 +1127,7 @@ func (h *Handler) forwardMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -1067,21 +1135,21 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req ReplyMessageRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	trimmedContent := strings.TrimSpace(req.Content)
 	if trimmedContent == "" {
-		WriteError(w, http.StatusBadRequest, "missing_content", "Reply content is required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_content", "Reply content is required")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "id")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
@@ -1089,11 +1157,11 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 	originalMsg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if originalMsg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -1101,7 +1169,7 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), originalMsg.ChatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -1113,7 +1181,7 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -1123,11 +1191,11 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 			blocked, err := h.storage.IsUserBlocked(r.Context(), m.UserID, claims.UserID)
 			if err != nil {
 				h.logger.Error("failed to check blocking status", "error", err)
-				WriteError(w, http.StatusInternalServerError, "internal", "Failed to check blocking status")
+				WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check blocking status")
 				return
 			}
 			if blocked {
-				WriteError(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
+				WriteErrorCode(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
 				return
 			}
 		}
@@ -1144,7 +1212,7 @@ func (h *Handler) replyMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.CreateMessage(r.Context(), replyMsg); err != nil {
 		h.logger.Error("failed to create reply message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to send reply")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to send reply")
 		return
 	}
 
@@ -1178,14 +1246,14 @@ type EditMessageRequest struct {
 func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "msgID")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
 		return
 	}
 
@@ -1193,14 +1261,14 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req EditMessageRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	trimmedContent := strings.TrimSpace(req.Content)
 	if trimmedContent == "" {
-		WriteError(w, http.StatusBadRequest, "missing_content", "Message content is required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_content", "Message content is required")
 		return
 	}
 
@@ -1208,11 +1276,11 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if msg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -1220,13 +1288,13 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, _ := uuid.Parse(chatIDStr)
 	if msg.ChatID != chatID {
-		WriteError(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
 		return
 	}
 
 	// Check sender
 	if msg.SenderID != claims.UserID {
-		WriteError(w, http.StatusForbidden, "forbidden", "Can only edit own messages")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Can only edit own messages")
 		return
 	}
 
@@ -1236,7 +1304,7 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.UpdateMessage(r.Context(), msg); err != nil {
 		h.logger.Error("failed to update message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update message")
 		return
 	}
 
@@ -1266,14 +1334,14 @@ func (h *Handler) editMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "msgID")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
 		return
 	}
 
@@ -1281,11 +1349,11 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if msg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -1293,7 +1361,7 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, _ := uuid.Parse(chatIDStr)
 	if msg.ChatID != chatID {
-		WriteError(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
 		return
 	}
 
@@ -1301,11 +1369,11 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	chat, err := h.storage.GetChatByID(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat")
 		return
 	}
 	if chat == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Chat not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Chat not found")
 		return
 	}
 
@@ -1313,7 +1381,7 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -1332,14 +1400,14 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 	isOwnMessage := msg.SenderID == claims.UserID
 	isDirectChat := chat.Type == "direct"
 	if !isOwnMessage && !isDirectChat && callerRole != models.ChatRoleOwner && callerRole != models.ChatRoleAdmin {
-		WriteError(w, http.StatusForbidden, "forbidden", "Can only delete own messages")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Can only delete own messages")
 		return
 	}
 
 	// Delete message
 	if err := h.storage.DeleteMessage(r.Context(), messageID); err != nil {
 		h.logger.Error("failed to delete message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to delete message")
 		return
 	}
 
@@ -1360,21 +1428,21 @@ func (h *Handler) deleteMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "msgID")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_msg_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_msg_id", "Invalid message ID")
 		return
 	}
 
@@ -1382,15 +1450,15 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if msg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 	if msg.ChatID != chatID {
-		WriteError(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Message does not belong to this chat")
 		return
 	}
 
@@ -1398,7 +1466,7 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 	var isMember bool
@@ -1409,19 +1477,19 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "Not a chat member")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Not a chat member")
 		return
 	}
 
 	// Parse multipart form (max 50MB)
 	if err := r.ParseMultipartForm(50 << 20); err != nil {
 		h.logger.Error("failed to parse multipart form", "error", err)
-		WriteError(w, http.StatusBadRequest, "invalid_form", "Failed to parse form data")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_form", "Failed to parse form data")
 		return
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "no_file", "No file provided")
+		WriteErrorCode(w, http.StatusBadRequest, "no_file", "No file provided")
 		return
 	}
 	defer func() {
@@ -1432,7 +1500,7 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Limit file size
 	if header.Size > 50<<20 {
-		WriteError(w, http.StatusBadRequest, "file_too_large", "File too large (max 50MB)")
+		WriteErrorCode(w, http.StatusBadRequest, "file_too_large", "File too large (max 50MB)")
 		return
 	}
 
@@ -1463,13 +1531,13 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	fileID := uuid.New()
 	if ext == "" {
 		// No extension - reject for security
-		WriteError(w, http.StatusBadRequest, "invalid_file", "File must have an extension")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file", "File must have an extension")
 		return
 	}
 
 	extLower := strings.ToLower(ext)
 	if !allowedExts[extLower] {
-		WriteError(w, http.StatusBadRequest, "invalid_extension", "File extension not allowed")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_extension", "File extension not allowed")
 		return
 	}
 
@@ -1478,21 +1546,21 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	n, err := file.Read(buffer)
 	if err != nil && err != io.EOF {
 		h.logger.Error("failed to read file header", "error", err)
-		WriteError(w, http.StatusBadRequest, "invalid_file", "Failed to read file")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file", "Failed to read file")
 		return
 	}
 
 	// Seek back to beginning of file
 	if _, err := file.Seek(0, 0); err != nil {
 		h.logger.Error("failed to seek file", "error", err)
-		WriteError(w, http.StatusBadRequest, "invalid_file", "Failed to process file")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file", "Failed to process file")
 		return
 	}
 
 	// Validate magic bytes match the declared extension
 	if !validateFileMagicBytes(buffer[:n], extLower) {
 		h.logger.Warn("File content does not match extension", "extension", extLower)
-		WriteError(w, http.StatusBadRequest, "invalid_file_content", "File content does not match declared type")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file_content", "File content does not match declared type")
 		return
 	}
 
@@ -1502,27 +1570,36 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	uploadDir := "./uploads"
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		h.logger.Error("failed to create upload dir", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save file")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save file")
 		return
+	}
+
+	// Read full file content
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
+		h.logger.Error("failed to read file content", "error", err)
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to read file")
+		return
+	}
+
+	// Encrypt file content at rest if master key is available
+	dataToWrite := fileBytes
+	if crypto.IsInitialized() {
+		encrypted, encErr := crypto.EncryptBytes(fileBytes)
+		if encErr != nil {
+			h.logger.Error("failed to encrypt file", "error", encErr)
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to encrypt file")
+			return
+		}
+		dataToWrite = encrypted
+		h.logger.Info("file encrypted at rest", "filename", filename)
 	}
 
 	// Save file
 	filePath := filepath.Join(uploadDir, filename)
-	out, err := os.Create(filePath)
-	if err != nil {
-		h.logger.Error("failed to create file", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save file")
-		return
-	}
-	defer func() {
-		if cerr := out.Close(); cerr != nil {
-			h.logger.Error("failed to close file", "error", cerr)
-		}
-	}()
-
-	if _, err := io.Copy(out, file); err != nil {
+	if err := os.WriteFile(filePath, dataToWrite, 0600); err != nil {
 		h.logger.Error("failed to write file", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save file")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save file")
 		return
 	}
 
@@ -1549,7 +1626,7 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 	if err := h.storage.CreateFile(r.Context(), fileRecord); err != nil {
 		h.logger.Error("failed to save file record", "error", err)
 		os.Remove(filePath) // Clean up
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save file record")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save file record")
 		return
 	}
 
@@ -1577,7 +1654,7 @@ func (h *Handler) uploadFile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -1588,14 +1665,14 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 		Typing bool   `json:"typing"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	chatID, err := uuid.Parse(req.ChatID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_chat_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_chat_id", "Invalid chat ID")
 		return
 	}
 
@@ -1603,7 +1680,7 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -1615,7 +1692,7 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -1637,7 +1714,7 @@ func (h *Handler) sendTypingIndicator(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -1647,7 +1724,7 @@ func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 		MessageID string `json:"message_id"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
@@ -1655,13 +1732,13 @@ func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
 	messageID, err := uuid.Parse(req.MessageID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
@@ -1669,7 +1746,7 @@ func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -1681,13 +1758,13 @@ func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
 	if err := h.storage.PinMessage(r.Context(), chatID, messageID, claims.UserID); err != nil {
 		h.logger.Error("failed to pin message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to pin message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to pin message")
 		return
 	}
 
@@ -1709,14 +1786,14 @@ func (h *Handler) pinMessage(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	messageIDStr := chi.URLParam(r, "id")
 	messageID, err := uuid.Parse(messageIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid message ID")
 		return
 	}
 
@@ -1724,11 +1801,11 @@ func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.storage.GetMessageByID(r.Context(), messageID)
 	if err != nil {
 		h.logger.Error("failed to get message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get message")
 		return
 	}
 	if msg == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Message not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Message not found")
 		return
 	}
 
@@ -1736,7 +1813,7 @@ func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), msg.ChatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -1748,7 +1825,7 @@ func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
@@ -1765,7 +1842,7 @@ func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 	msg.ThreadID = &messageID
 	if err := h.storage.UpdateMessage(r.Context(), msg); err != nil {
 		h.logger.Error("failed to update message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create thread")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to create thread")
 		return
 	}
 
@@ -1779,14 +1856,14 @@ func (h *Handler) startThread(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	threadIDStr := chi.URLParam(r, "id")
 	threadID, err := uuid.Parse(threadIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid thread ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid thread ID")
 		return
 	}
 
@@ -1808,7 +1885,7 @@ func (h *Handler) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 	messages, err := h.storage.GetThreadMessages(r.Context(), threadID, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to get thread messages", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get thread messages")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get thread messages")
 		return
 	}
 
@@ -1831,7 +1908,7 @@ func (h *Handler) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !hasAccess && len(messages) > 0 {
-		WriteError(w, http.StatusForbidden, "forbidden", "You don't have access to this thread")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You don't have access to this thread")
 		return
 	}
 
@@ -1846,7 +1923,7 @@ func (h *Handler) getThreadMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -1856,7 +1933,7 @@ func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
 		MessageID string `json:"message_id"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
@@ -1864,13 +1941,13 @@ func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
 	chatIDStr := chi.URLParam(r, "id")
 	chatID, err := uuid.Parse(chatIDStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
 	messageID, err := uuid.Parse(req.MessageID)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_message_id", "Invalid message ID")
 		return
 	}
 
@@ -1878,7 +1955,7 @@ func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
 		h.logger.Error("failed to get chat members", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to verify chat membership")
 		return
 	}
 
@@ -1890,13 +1967,13 @@ func (h *Handler) unpinMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
 		return
 	}
 
 	if err := h.storage.UnpinMessage(r.Context(), chatID, messageID); err != nil {
 		h.logger.Error("failed to unpin message", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to unpin message")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to unpin message")
 		return
 	}
 

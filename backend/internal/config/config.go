@@ -38,6 +38,7 @@ type Config struct {
 	TURNServerURI        string
 	TURNUsername         string
 	TURNPassword         string
+	TURNExternalIP       string
 	TLSEnabled           bool
 	TLSCertPath          string
 	TLSKeyPath           string
@@ -45,6 +46,7 @@ type Config struct {
 	LiveKitURL           string
 	LiveKitAPIKey        string
 	LiveKitAPISecret     string
+	RedisURL             string
 }
 
 func Load() (Config, error) {
@@ -187,6 +189,7 @@ func Load() (Config, error) {
 	cfg.TURNServerURI = optional("TURN_SERVER_URI")
 	cfg.TURNUsername = optional("TURN_USERNAME")
 	cfg.TURNPassword = optional("TURN_PASSWORD")
+	cfg.TURNExternalIP = optional("TURN_EXTERNAL_IP")
 
 	// Parse TLS configuration
 	if tlsEnabled := optional("TLS_ENABLED"); tlsEnabled != "" {
@@ -208,6 +211,12 @@ func Load() (Config, error) {
 	cfg.LiveKitAPIKey = optional("LIVEKIT_API_KEY")
 	cfg.LiveKitAPISecret = optional("LIVEKIT_API_SECRET")
 
+	// Parse Redis URL (optional - rate limiting will work without Redis)
+	cfg.RedisURL = optional("REDIS_URL")
+	if cfg.RedisURL == "" {
+		cfg.RedisURL = "redis:6379" // Default for local development
+	}
+
 	return cfg, nil
 }
 
@@ -221,15 +230,32 @@ func (c Config) Validate() error {
 	if !contains([]string{"debug", "info", "warn", "error"}, c.LogLevel) {
 		return fmt.Errorf("env LOG_LEVEL must be one of: debug, info, warn, error")
 	}
-	if c.EjabberdPort < 1 || c.EjabberdPort > 65535 {
+	if c.EjabberdPort != 0 && (c.EjabberdPort < 1 || c.EjabberdPort > 65535) {
 		return fmt.Errorf("env EJABBERD_PORT must be between 1 and 65535 when provided")
 	}
 	return nil
 }
+
+// secretValue reads a config value with Docker secrets support.
+// It first checks the env var directly (KEY), then reads from the file path
+// stored in the KEY_FILE env var (standard Docker secrets convention).
+func secretValue(key string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	if filePath := strings.TrimSpace(os.Getenv(key + "_FILE")); filePath != "" {
+		content, err := os.ReadFile(filePath)
+		if err == nil {
+			return strings.TrimSpace(string(content))
+		}
+	}
+	return ""
+}
+
 func required(key string) (string, error) {
-	v := strings.TrimSpace(os.Getenv(key))
+	v := secretValue(key)
 	if v == "" {
-		return "", fmt.Errorf("missing required env %s", key)
+		return "", fmt.Errorf("missing required env %s (or %s_FILE)", key, key)
 	}
 	return v, nil
 }
@@ -244,7 +270,7 @@ func requiredInt(key string) (int, error) {
 	}
 	return n, nil
 }
-func optional(key string) string { return strings.TrimSpace(os.Getenv(key)) }
+func optional(key string) string { return secretValue(key) }
 func contains(items []string, target string) bool {
 	for _, item := range items {
 		if item == target {

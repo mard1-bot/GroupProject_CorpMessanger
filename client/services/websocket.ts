@@ -13,6 +13,8 @@ export const WS_EVENTS = {
   CHAT_CREATED: 'chat_created',
   CHAT_DELETED: 'chat_deleted',
   CHAT_UPDATED: 'chat_updated',
+  CHATS_LOADED: 'chats_loaded',
+  MESSAGES_LOADED: 'messages_loaded',
   ERROR: 'error',
   // WebRTC call events
   CALL_OFFER: 'call_offer',
@@ -217,6 +219,20 @@ class WebSocketService {
   // Send read receipt
   sendReadReceipt(chatId: string, messageId: string): void {
     this.send('read_receipt', { chat_id: chatId, message_id: messageId });
+  }
+
+  // Load chats synchronously
+  loadChats(): void {
+    this.send('load_chats', {});
+  }
+
+  // Load messages for a specific chat synchronously
+  loadMessages(chatId: string, limit?: number, offset?: number): void {
+    this.send('load_messages', { 
+      chat_id: chatId, 
+      limit: limit || 50, 
+      offset: offset || 0 
+    });
   }
 
   // Event listeners

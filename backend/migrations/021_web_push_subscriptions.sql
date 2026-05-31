@@ -8,4 +8,4 @@ CREATE TABLE IF NOT EXISTS web_push_subscriptions (
     UNIQUE (user_id, endpoint)
 );
 
-CREATE INDEX idx_web_push_subscriptions_user_id ON web_push_subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_web_push_subscriptions_user_id ON web_push_subscriptions(user_id);

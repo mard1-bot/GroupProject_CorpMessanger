@@ -26,6 +26,9 @@ type Storage interface {
 	ReactionStorage
 	AuditStorage
 	LoginAttemptStorage
+	TwoFactorStorage
+	AdminStorage
+	GDPRStorage
 }
 
 type UserStorage interface {
@@ -34,10 +37,12 @@ type UserStorage interface {
 	DeleteUser(ctx context.Context, userID uuid.UUID) error
 	GetUserByEmail(ctx context.Context, email string) (*models.User, string, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error)
+	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	GetUserByIDWithPassword(ctx context.Context, id uuid.UUID) (*models.User, string, error)
 	GetUsers(ctx context.Context, search string, excludeUserID string, limit int) ([]*models.User, error)
 	UpdateUser(ctx context.Context, user *models.User) error
 	UpdateUserStatus(ctx context.Context, userID uuid.UUID, status, customStatus string) error
+	UpdateUserRole(ctx context.Context, userID uuid.UUID, role string) error
 	UsersShareChat(ctx context.Context, userID1, userID2 uuid.UUID) (bool, error)
 }
 
@@ -72,8 +77,8 @@ type MessageStorage interface {
 	GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error)
 	GetMessagesByChatForUser(ctx context.Context, chatID, userID uuid.UUID, limit, offset int) ([]*models.Message, error)
 	GetAllMessagesByChat(ctx context.Context, chatID uuid.UUID) ([]*models.Message, error)
-	SearchMessages(ctx context.Context, chatID uuid.UUID, query string, limit, offset int) ([]*models.Message, error)
-	SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, limit, offset int) ([]*models.Message, error)
+	SearchMessages(ctx context.Context, chatID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error)
+	SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error)
 	UpdateMessage(ctx context.Context, msg *models.Message) error
 	UpdateMessageFileURL(ctx context.Context, messageID uuid.UUID, fileURL string) error
 	DeleteMessage(ctx context.Context, messageID uuid.UUID) error
@@ -105,6 +110,7 @@ type SessionStorage interface {
 	GetSessionByToken(ctx context.Context, token string) (*models.Session, error)
 	DeleteSession(ctx context.Context, token string) error
 	DeleteOldSessionsForUser(ctx context.Context, userID uuid.UUID, keep int) error
+	DeleteAllUserSessions(ctx context.Context, userID uuid.UUID) error
 }
 
 type FileStorage interface {
@@ -117,6 +123,7 @@ type AuditStorage interface {
 	CreateAuditLog(ctx context.Context, log *models.AuditLog) error
 	GetAuditLogs(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*models.AuditLog, error)
 	GetAllAuditLogs(ctx context.Context, limit, offset int) ([]*models.AuditLog, error) // Admin only
+	DeleteAuditLogs(ctx context.Context, beforeDate *time.Time) (int64, error)          // Delete logs before date (or all if nil)
 }
 
 type NotificationStorage interface {
@@ -138,6 +145,8 @@ type EncryptionStorage interface {
 	GetUserPublicKey(ctx context.Context, userID uuid.UUID) (*models.EncryptionKey, error)
 	GetUsersPublicKeys(ctx context.Context, userIDs []uuid.UUID) (map[uuid.UUID]*models.EncryptionKey, error)
 	SaveUserPublicKey(ctx context.Context, key *models.EncryptionKey) error
+	RotateEncryptionKey(ctx context.Context, userID uuid.UUID, newPublicKey, newPrivateKey, reason string) (int, error)
+	GetEncryptionKeyByVersion(ctx context.Context, userID uuid.UUID, version int) (*models.EncryptionKey, error)
 }
 
 type BookmarkStorage interface {
@@ -185,6 +194,9 @@ func (s *StubStorage) GetUserByEmail(ctx context.Context, email string) (*models
 	return nil, "", nil
 }
 func (s *StubStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	return nil, nil
+}
+func (s *StubStorage) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
 	return nil, nil
 }
 func (s *StubStorage) GetUserByIDWithPassword(ctx context.Context, id uuid.UUID) (*models.User, string, error) {
@@ -254,10 +266,10 @@ func (s *StubStorage) GetMessagesByChatForUser(ctx context.Context, chatID, user
 func (s *StubStorage) GetAllMessagesByChat(ctx context.Context, chatID uuid.UUID) ([]*models.Message, error) {
 	return nil, nil
 }
-func (s *StubStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+func (s *StubStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }
-func (s *StubStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+func (s *StubStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
 	return nil, nil
 }
 func (s *StubStorage) UpdateMessage(ctx context.Context, msg *models.Message) error { return nil }
@@ -310,6 +322,9 @@ func (s *StubStorage) GetAuditLogs(ctx context.Context, userID uuid.UUID, limit,
 func (s *StubStorage) GetAllAuditLogs(ctx context.Context, limit, offset int) ([]*models.AuditLog, error) {
 	return nil, nil
 }
+func (s *StubStorage) DeleteAuditLogs(ctx context.Context, beforeDate *time.Time) (int64, error) {
+	return 0, nil
+}
 
 // NotificationStorage stubs
 func (s *StubStorage) CreateDeviceToken(ctx context.Context, token *models.DeviceToken) error {
@@ -354,6 +369,12 @@ func (s *StubStorage) GetUsersPublicKeys(ctx context.Context, userIDs []uuid.UUI
 }
 func (s *StubStorage) SaveUserPublicKey(ctx context.Context, key *models.EncryptionKey) error {
 	return nil
+}
+func (s *StubStorage) RotateEncryptionKey(ctx context.Context, userID uuid.UUID, newPublicKey, newPrivateKey, reason string) (int, error) {
+	return 1, nil
+}
+func (s *StubStorage) GetEncryptionKeyByVersion(ctx context.Context, userID uuid.UUID, version int) (*models.EncryptionKey, error) {
+	return nil, nil
 }
 
 // BookmarkStorage stubs
@@ -447,6 +468,83 @@ func (s *StubStorage) GetFailedLoginAttempts(ctx context.Context, email string, 
 
 func (s *StubStorage) CleanupOldLoginAttempts(ctx context.Context, olderThan time.Time) error {
 	return nil
+}
+
+func (s *StubStorage) CreateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	return nil
+}
+
+func (s *StubStorage) GetTwoFactorSettings(ctx context.Context, userID uuid.UUID) (*models.TwoFactorSettings, error) {
+	return nil, nil
+}
+
+func (s *StubStorage) UpdateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	return nil
+}
+
+func (s *StubStorage) DeleteTwoFactorSettings(ctx context.Context, userID uuid.UUID) error {
+	return nil
+}
+
+func (s *StubStorage) VerifyUserPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	return nil
+}
+
+func (s *StubStorage) UpdateUserRole(ctx context.Context, userID uuid.UUID, role string) error {
+	return nil
+}
+
+func (s *StubStorage) DeleteAllUserSessions(ctx context.Context, userID uuid.UUID) error {
+	return nil
+}
+
+func (s *StubStorage) GetAdminStats(ctx context.Context) (*models.AdminStats, error) {
+	return &models.AdminStats{}, nil
+}
+
+func (s *StubStorage) SaveUserConsent(ctx context.Context, consent *models.UserConsent) error {
+	return nil
+}
+
+func (s *StubStorage) GetUserConsents(ctx context.Context, userID uuid.UUID) ([]*models.UserConsent, error) {
+	return nil, nil
+}
+
+func (s *StubStorage) HasValidConsent(ctx context.Context, userID uuid.UUID, consentType string) (bool, error) {
+	return false, nil
+}
+
+func (s *StubStorage) CreateDataExportRequest(ctx context.Context, request *models.DataExportRequest) error {
+	return nil
+}
+
+func (s *StubStorage) GetDataExportRequests(ctx context.Context, userID uuid.UUID) ([]*models.DataExportRequest, error) {
+	return nil, nil
+}
+
+func (s *StubStorage) AnonymizeUserData(ctx context.Context, userID uuid.UUID) (map[string]interface{}, error) {
+	return make(map[string]interface{}), nil
+}
+
+type AdminStorage interface {
+	GetAdminStats(ctx context.Context) (*models.AdminStats, error)
+}
+
+type TwoFactorStorage interface {
+	CreateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error
+	GetTwoFactorSettings(ctx context.Context, userID uuid.UUID) (*models.TwoFactorSettings, error)
+	UpdateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error
+	DeleteTwoFactorSettings(ctx context.Context, userID uuid.UUID) error
+	VerifyUserPassword(ctx context.Context, userID uuid.UUID, password string) error
+}
+
+type GDPRStorage interface {
+	SaveUserConsent(ctx context.Context, consent *models.UserConsent) error
+	GetUserConsents(ctx context.Context, userID uuid.UUID) ([]*models.UserConsent, error)
+	HasValidConsent(ctx context.Context, userID uuid.UUID, consentType string) (bool, error)
+	CreateDataExportRequest(ctx context.Context, request *models.DataExportRequest) error
+	GetDataExportRequests(ctx context.Context, userID uuid.UUID) ([]*models.DataExportRequest, error)
+	AnonymizeUserData(ctx context.Context, userID uuid.UUID) (map[string]interface{}, error)
 }
 
 type testEjabberd struct{ err error }

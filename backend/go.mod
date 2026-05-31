@@ -1,6 +1,6 @@
 module corp-messenger/backend
 
-go 1.23
+go 1.25.0
 
 require (
 	github.com/go-chi/chi/v5 v5.2.0
@@ -13,9 +13,16 @@ require (
 
 require github.com/gorilla/websocket v1.5.3
 
-require github.com/SherClockHolmes/webpush-go v1.4.0
+require (
+	github.com/SherClockHolmes/webpush-go v1.4.0
+	github.com/livekit/protocol v1.9.7
+	github.com/livekit/server-sdk-go v1.1.8
+	github.com/redis/go-redis/v9 v9.4.0
+	golang.org/x/oauth2 v0.36.0
+)
 
 require (
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
@@ -35,9 +42,7 @@ require (
 	github.com/lithammer/shortuuid/v4 v4.0.0 // indirect
 	github.com/livekit/mageutil v0.0.0-20230125210925-54e8a70427c1 // indirect
 	github.com/livekit/mediatransportutil v0.0.0-20231213075826-cccbf2b93d3f // indirect
-	github.com/livekit/protocol v1.9.7 // indirect
 	github.com/livekit/psrpc v0.5.3-0.20231214055026-06ce27a934c9 // indirect
-	github.com/livekit/server-sdk-go v1.1.8 // indirect
 	github.com/mackerelio/go-osstat v0.2.4 // indirect
 	github.com/magefile/mage v1.15.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions/v2 v2.0.0 // indirect
@@ -65,7 +70,6 @@ require (
 	github.com/prometheus/client_model v0.5.0 // indirect
 	github.com/prometheus/common v0.45.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
-	github.com/redis/go-redis/v9 v9.4.0 // indirect
 	github.com/stretchr/testify v1.8.4 // indirect
 	github.com/thoas/go-funk v0.9.3 // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect

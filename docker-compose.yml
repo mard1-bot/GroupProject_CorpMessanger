@@ -1,21 +1,4 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: corp-postgres
-    environment:
-      POSTGRES_DB: corpmessenger
-      POSTGRES_USER: corpmessenger
-      POSTGRES_PASSWORD: corpmessenger_password
-    ports:
-      - "5433:5432"
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U corpmessenger"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   redis:
     image: redis:7-alpine
     container_name: corp-redis
@@ -23,11 +6,33 @@ services:
       - "6379:6379"
     volumes:
       - ./data/redis:/data
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --tcp-keepalive 300 --timeout 0
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  coturn:
+    image: coturn/coturn:4.6.2
+    container_name: corp-coturn
+    network_mode: host
+    command: >
+      --log-file=stdout
+      --external-ip=${TURN_EXTERNAL_IP}
+      --listening-port=3478
+      --fingerprint
+      --lt-cred-mech
+      --user=${TURN_USERNAME}:${TURN_PASSWORD}
+      --realm=corpmessenger
+      --no-cli
+      --no-tls
+      --no-dtls
+    environment:
+      TURN_USERNAME: ${TURN_USERNAME}
+      TURN_PASSWORD: ${TURN_PASSWORD}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
+    restart: unless-stopped
 
   livekit:
     image: livekit/livekit-server:latest
@@ -37,11 +42,13 @@ services:
       - "7881:7881"
       - "7882:7882/udp"
     environment:
-      LIVEKIT_KEYS: "devsecret: devsecret123456789012345678901234567890"
+      LIVEKIT_KEYS: ${LIVEKIT_KEYS}
       LIVEKIT_REDIS_ADDRESS: "redis:6379"
     depends_on:
       redis:
         condition: service_healthy
+    profiles:
+      - with-livekit
 
   ejabberd:
     image: ejabberd/ecs:24.07
@@ -53,9 +60,6 @@ services:
     volumes:
       - ./backend/ejabberd:/home/kong/ejabberd/conf
       - ./data/ejabberd:/home/kong/ejabberd/database
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   backend:
     build:
@@ -64,38 +68,49 @@ services:
       args:
         GOPROXY: https://proxy.golang.org,direct
     container_name: corp-backend
-    dns:
-      - 8.8.8.8
-      - 8.8.4.4
-    ports:
-      - "8080:8080"
-      - "8443:8443"
+    network_mode: host
     environment:
-      APP_ENV: local
-      HTTP_PORT: 8080
-      HTTPS_PORT: 8443
-      LOG_LEVEL: debug
-      DATABASE_URL: postgres://corpmessenger:corpmessenger_password@postgres:5432/corpmessenger?sslmode=disable
-      JWT_SECRET: your-secret-key-change-in-production
+      APP_ENV: ${APP_ENV}
+      HTTP_PORT: ${HTTP_PORT}
+      HTTPS_PORT: ${HTTPS_PORT}
+      LOG_LEVEL: ${LOG_LEVEL}
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/corp_messenger?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET}
       EJABBERD_HOST: localhost
-      EJABBERD_PORT: 5222
-      EJABBERD_USERNAME: admin
-      EJABBERD_PASSWORD: admin123
-      EJABBERD_ADMIN_USER: admin@localhost
-      LIVEKIT_URL: ws://livekit:7880
-      LIVEKIT_API_KEY: devsecret
-      LIVEKIT_API_SECRET: APISecret
-      ENCRYPTION_MASTER_KEY: N5yZV8oRu8nGKg9qCY5FT24toZI9Z9Ps0lzXFb//eAM=
-      CORS_ORIGINS: http://localhost:3000,http://localhost:19006,http://localhost:8081
-      ENABLE_HTTPS: "false"
-      SCHEDULER_ENABLED: "false"
+      EJABBERD_PORT: 5280
+      EJABBERD_USERNAME: ${EJABBERD_USERNAME}
+      EJABBERD_PASSWORD: ${EJABBERD_PASSWORD}
+      EJABBERD_ADMIN_USER: ${EJABBERD_ADMIN_USER}
+      LIVEKIT_URL: ws://localhost:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ENABLE_HTTPS: ${ENABLE_HTTPS}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED}
+      REDIS_URL: localhost:6379
+      TURN_SERVER_URI: turn:${TURN_EXTERNAL_IP}:3478
+      TURN_USERNAME: ${TURN_USERNAME}
+      TURN_PASSWORD: ${TURN_PASSWORD}
+      TLS_ENABLED: ${TLS_ENABLED}
+      TLS_CERT_PATH: ${TLS_CERT_PATH}
+      TLS_KEY_PATH: ${TLS_KEY_PATH}
+      HYBRID_MODE: ${HYBRID_MODE}
+      XMPP_SYNC_ENABLED: ${XMPP_SYNC_ENABLED}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH}
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
     depends_on:
-      postgres:
-        condition: service_healthy
       ejabberd:
         condition: service_started
-      livekit:
+      coturn:
         condition: service_started
     volumes:
       - ./backend/uploads:/app/uploads
-      - ./data/uploads:/app/uploads
+      - ./certs:/app/certs:ro

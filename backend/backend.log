@@ -1,2 +1,0 @@
-2026/04/27 06:45:19 ERROR application initialization failed error="init encryption master key: ENCRYPTION_MASTER_KEY environment variable is required"
-exit status 1

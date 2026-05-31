@@ -10,9 +10,14 @@ import (
 	"syscall"
 
 	"corp-messenger/backend/internal/app"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Load .env file (ignore error if not found - env vars may be set externally)
+	godotenv.Load()
+
 	application, err := app.New()
 	if err != nil {
 		slog.Error("application initialization failed", "error", err)

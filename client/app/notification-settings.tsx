@@ -29,6 +29,7 @@ interface NotificationSettings {
   quiet_hours_end?: string;
   quiet_hours_enabled: boolean;
   protocol_preference?: 'websocket' | 'xmpp';
+  hybrid_mode_enabled: boolean;
 }
 
 export default function NotificationSettingsScreen() {
@@ -44,6 +45,7 @@ export default function NotificationSettingsScreen() {
     quiet_hours_end: '09:00',
     quiet_hours_enabled: false,
     protocol_preference: 'websocket',
+    hybrid_mode_enabled: false,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -135,6 +137,7 @@ export default function NotificationSettingsScreen() {
             quiet_hours_end: parsed.quiet_hours_end || '09:00',
             quiet_hours_enabled: parsed.quiet_hours_enabled ?? false,
             protocol_preference: parsed.protocol_preference || 'websocket',
+            hybrid_mode_enabled: parsed.hybrid_mode_enabled ?? false,
           });
           loadedFromLocal = true;
         }
@@ -172,6 +175,7 @@ export default function NotificationSettingsScreen() {
           quiet_hours_end: formatTime(response.data.quiet_hours_end),
           quiet_hours_enabled: response.data.quiet_hours_enabled ?? false,
           protocol_preference: response.data.protocol_preference || 'websocket',
+          hybrid_mode_enabled: response.data.hybrid_mode_enabled ?? false,
         };
         console.log('[NotificationSettings] Setting server settings:', serverSettings);
         console.log('[NotificationSettings] quiet_hours_enabled from server:', response.data.quiet_hours_enabled, '->', serverSettings.quiet_hours_enabled);
@@ -210,6 +214,7 @@ export default function NotificationSettingsScreen() {
         protocol_preference: settings.protocol_preference || 'websocket',
         quiet_hours_start: formatTimeForSave(settings.quiet_hours_start),
         quiet_hours_end: formatTimeForSave(settings.quiet_hours_end),
+        hybrid_mode_enabled: settings.hybrid_mode_enabled,
       };
       console.log('[NotificationSettings] Settings to save:', settingsToSave);
       await api.updateNotificationSettings(settingsToSave);
@@ -361,7 +366,7 @@ export default function NotificationSettingsScreen() {
               Тихие часы
             </ThemedText>
           </View>
-          
+
           <View style={styles.settingRow}>
             <View style={styles.settingInfo}>
               <ThemedText style={[styles.settingLabel, { color: textColor }]}>
@@ -397,7 +402,7 @@ export default function NotificationSettingsScreen() {
                   maxLength={5}
                 />
               </View>
-              
+
               <View style={styles.timeInputRow}>
                 <ThemedText style={[styles.settingLabel, { color: textColor }]}>
                   До
@@ -414,6 +419,32 @@ export default function NotificationSettingsScreen() {
               </View>
             </View>
           )}
+        </View>
+
+        {/* Hybrid Mode */}
+        <View style={[styles.section, { backgroundColor: surfaceColor, borderColor }]}>
+          <View style={styles.sectionHeader}>
+            <MaterialIcons name="sync-alt" size={24} color={primaryColor} />
+            <ThemedText style={[styles.sectionTitle, { color: textColor }]}>
+              Гибридный режим (XMPP)
+            </ThemedText>
+          </View>
+
+          <View style={styles.settingRow}>
+            <View style={styles.settingInfo}>
+              <ThemedText style={[styles.settingLabel, { color: textColor }]}>
+                Включить гибридный режим
+              </ThemedText>
+              <ThemedText style={[styles.settingDescription, { color: textColor + '80' }]}>
+                Синхронизация между WebSocket и XMPP
+              </ThemedText>
+            </View>
+            <Switch
+              value={settings.hybrid_mode_enabled}
+              onValueChange={(value) => setSettings({ ...settings, hybrid_mode_enabled: value })}
+              trackColor={{ false: '#767577', true: primaryColor }}
+            />
+          </View>
         </View>
 
         <TouchableOpacity

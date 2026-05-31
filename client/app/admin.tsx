@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -7,9 +7,13 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Platform,
+  Modal,
+  TextInput,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { useAuth } from '@/contexts/auth-context';
 import { api } from '@/services/api';
 import { ThemedText } from '@/components/themed-text';
@@ -33,7 +37,7 @@ interface AdminStats {
 
 export default function AdminScreen() {
   const router = useRouter();
-  const { user, token } = useAuth();
+  const { user, token, isLoading: isAuthLoading, refreshUser } = useAuth();
   const insets = useSafeAreaInsets();
 
   const [loading, setLoading] = useState(true);
@@ -47,14 +51,29 @@ export default function AdminScreen() {
   const primaryColor = useThemeColor({}, 'primary');
   const borderColor = useThemeColor({}, 'border');
 
-  useEffect(() => {
-    if (user?.role !== 'admin') {
-      Alert.alert('Ошибка', 'Доступ запрещен');
-      router.back();
-      return;
-    }
-    loadData();
-  }, []);
+  // Check admin role on focus and refresh user data from server
+  useFocusEffect(
+    useCallback(() => {
+      if (isAuthLoading) return;
+      if (!user) {
+        router.replace('/login');
+        return;
+      }
+      // Always refresh user data from server to catch role changes
+      refreshUser().then(() => {
+        // Re-check role after refresh (user state will update on next render)
+        // For immediate check, fetch current user from API
+        api.getCurrentUser().then(res => {
+          if (res.data && res.data.role !== 'admin') {
+            Alert.alert('Доступ запрещен', 'Ваша роль была изменена');
+            router.replace('/');
+          } else if (res.data && res.data.role === 'admin') {
+            loadData();
+          }
+        });
+      });
+    }, [isAuthLoading])
+  );
 
   const loadData = async () => {
     setLoading(true);
@@ -65,16 +84,81 @@ export default function AdminScreen() {
       ]);
 
       if (logsRes.data) {
-        setAuditLogs(logsRes.data);
+        setAuditLogs(Array.isArray(logsRes.data) ? logsRes.data : (logsRes.data as any).logs || (logsRes.data as any).audit_logs || []);
       }
       if (usersRes.data) {
-        setAllUsers(usersRes.data);
+        setAllUsers(Array.isArray(usersRes.data) ? usersRes.data : (usersRes.data as any).users || []);
       }
     } catch (error) {
       console.error('Failed to load admin data:', error);
       Alert.alert('Ошибка', 'Не удалось загрузить данные');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const [resetPasswordModalVisible, setResetPasswordModalVisible] = useState(false);
+  const [resetPasswordUser, setResetPasswordUser] = useState<any>(null);
+  const [newPassword, setNewPassword] = useState('');
+
+  const handleDeleteLogs = async () => {
+    Alert.alert(
+      'Подтверждение',
+      'Вы уверены, что хотите удалить все аудит логи?',
+      [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Удалить',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const res = await api.deleteAuditLogs();
+              if (res.data) {
+                Alert.alert('Успешно', `Удалено ${res.data.deleted_count} записей`);
+                setAuditLogs([]);
+              }
+            } catch (error) {
+              Alert.alert('Ошибка', 'Не удалось удалить логи');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const handleOpenResetPassword = (user: any) => {
+    setResetPasswordUser(user);
+    setNewPassword('');
+    setResetPasswordModalVisible(true);
+  };
+
+  const handleResetPassword = async () => {
+    if (!newPassword || newPassword.length < 8) {
+      Alert.alert('Ошибка', 'Пароль должен быть минимум 8 символов');
+      return;
+    }
+    // Check for password requirements (uppercase, lowercase, digit, special)
+    const hasUpper = /[A-Z]/.test(newPassword);
+    const hasLower = /[a-z]/.test(newPassword);
+    const hasDigit = /[0-9]/.test(newPassword);
+    const hasSpecial = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(newPassword);
+    
+    if (!hasUpper || !hasLower || !hasDigit || !hasSpecial) {
+      Alert.alert('Ошибка', 'Пароль должен содержать: заглавную букву, строчную букву, цифру и спецсимвол');
+      return;
+    }
+    try {
+      const res = await api.adminResetPassword(resetPasswordUser.id, newPassword);
+      if (res.data) {
+        Alert.alert('Успешно', 'Пароль сброшен. Пользователь должен войти заново.');
+        setResetPasswordModalVisible(false);
+        setResetPasswordUser(null);
+        setNewPassword('');
+      } else {
+        Alert.alert('Ошибка', res.error?.message || 'Не удалось сбросить пароль');
+      }
+    } catch (e: any) {
+      Alert.alert('Ошибка', e.message || 'Не удалось сбросить пароль');
     }
   };
 
@@ -158,9 +242,20 @@ export default function AdminScreen() {
       <ScrollView style={styles.content}>
         {selectedTab === 'logs' && (
           <View style={styles.section}>
-            <ThemedText style={[styles.sectionTitle, { color: textColor }]}>
-              Audit Логи
-            </ThemedText>
+            <View style={styles.sectionHeader}>
+              <ThemedText style={[styles.sectionTitle, { color: textColor }]}>
+                Audit Логи
+              </ThemedText>
+              {auditLogs.length > 0 && (
+                <TouchableOpacity
+                  style={[styles.deleteButton, { backgroundColor: '#dc3545' }]}
+                  onPress={handleDeleteLogs}
+                >
+                  <MaterialIcons name="delete" size={18} color="#fff" />
+                  <ThemedText style={styles.deleteButtonText}>Очистить все</ThemedText>
+                </TouchableOpacity>
+              )}
+            </View>
             {auditLogs.length === 0 ? (
               <ThemedText style={[styles.emptyText, { color: textColor + '80' }]}>
                 Нет записей
@@ -222,6 +317,71 @@ export default function AdminScreen() {
                   <ThemedText style={[styles.userId, { color: textColor + '40' }]}>
                     ID: {u.id}
                   </ThemedText>
+                  {u.id !== user?.id && (
+                    <View style={styles.userActions}>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, { backgroundColor: '#2196F3' }]}
+                        onPress={() => handleOpenResetPassword(u)}>
+                        <MaterialIcons name="lock-reset" size={18} color="#fff" />
+                        <Text style={styles.actionBtnText}>Сброс пароля</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, { backgroundColor: u.role === 'admin' ? '#FF9800' : '#4CAF50' }]}
+                        onPress={async () => {
+                          const newRole = u.role === 'admin' ? 'user' : 'admin';
+                          const doChange = async () => {
+                            try {
+                              const res = await api.adminChangeRole(u.id, newRole);
+                              if (res.data) {
+                                setAllUsers(prev => prev.map(usr => usr.id === u.id ? { ...usr, role: newRole } : usr));
+                              } else {
+                                Alert.alert('Ошибка', res.error?.message || 'Не удалось сменить роль');
+                              }
+                            } catch (e: any) {
+                              Alert.alert('Ошибка', e.message || 'Не удалось сменить роль');
+                            }
+                          };
+                          if (Platform.OS === 'web') {
+                            if (window.confirm(`${newRole === 'admin' ? 'Назначить' : 'Снять'} администратора для ${u.first_name}?`)) doChange();
+                          } else {
+                            Alert.alert('Смена роли', `${newRole === 'admin' ? 'Назначить' : 'Снять'} администратора для ${u.first_name}?`, [
+                              { text: 'Отмена', style: 'cancel' },
+                              { text: 'ОК', onPress: doChange },
+                            ]);
+                          }
+                        }}>
+                        <MaterialIcons name={u.role === 'admin' ? 'remove-moderator' : 'admin-panel-settings'} size={18} color="#fff" />
+                        <Text style={styles.actionBtnText}>{u.role === 'admin' ? 'Снять админа' : 'Дать админа'}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, { backgroundColor: '#f44336' }]}
+                        onPress={async () => {
+                          const doDelete = async () => {
+                            try {
+                              const res = await api.adminDeleteUser(u.id);
+                              if (res.data || !res.error) {
+                                setAllUsers(prev => prev.filter(usr => usr.id !== u.id));
+                              } else {
+                                Alert.alert('Ошибка', res.error?.message || 'Не удалось удалить');
+                              }
+                            } catch (e: any) {
+                              Alert.alert('Ошибка', e.message || 'Не удалось удалить');
+                            }
+                          };
+                          if (Platform.OS === 'web') {
+                            if (window.confirm(`Удалить пользователя ${u.first_name} ${u.last_name}? Это действие необратимо!`)) doDelete();
+                          } else {
+                            Alert.alert('Удаление', `Удалить пользователя ${u.first_name} ${u.last_name}? Это действие необратимо!`, [
+                              { text: 'Отмена', style: 'cancel' },
+                              { text: 'Удалить', style: 'destructive', onPress: doDelete },
+                            ]);
+                          }
+                        }}>
+                        <MaterialIcons name="delete" size={18} color="#fff" />
+                        <Text style={styles.actionBtnText}>Удалить</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               ))
             )}
@@ -258,6 +418,43 @@ export default function AdminScreen() {
           </View>
         )}
       </ScrollView>
+
+      <Modal
+        visible={resetPasswordModalVisible}
+        transparent={true}
+        animationType="slide"
+        onRequestClose={() => setResetPasswordModalVisible(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: surfaceColor }]}>
+            <ThemedText style={[styles.modalTitle, { color: textColor }]}>
+              Сброс пароля
+            </ThemedText>
+            <ThemedText style={[styles.modalText, { color: textColor + '80' }]}>
+              {resetPasswordUser?.first_name} {resetPasswordUser?.last_name}
+            </ThemedText>
+            <TextInput
+              style={[styles.modalInput, { backgroundColor: backgroundColor, color: textColor, borderColor }]}
+              placeholder="Заглавная, строчная, цифра, спецсимвол (мин. 8 символов)"
+              placeholderTextColor={textColor + '60'}
+              value={newPassword}
+              onChangeText={setNewPassword}
+              secureTextEntry
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: '#999' }]}
+                onPress={() => setResetPasswordModalVisible(false)}>
+                <Text style={styles.modalButtonText}>Отмена</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, { backgroundColor: '#2196F3' }]}
+                onPress={handleResetPassword}>
+                <Text style={styles.modalButtonText}>Сбросить</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ThemedView>
   );
 }
@@ -306,10 +503,28 @@ const styles = StyleSheet.create({
   section: {
     paddingBottom: 16,
   },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
   sectionTitle: {
     fontSize: 18,
     fontWeight: '600',
-    marginBottom: 16,
+  },
+  deleteButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+    gap: 6,
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
   },
   emptyText: {
     fontSize: 14,
@@ -373,6 +588,67 @@ const styles = StyleSheet.create({
   },
   userId: {
     fontSize: 12,
+  },
+  userActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 8,
+  },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    gap: 4,
+  },
+  actionBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '80%',
+    maxWidth: 400,
+    padding: 20,
+    borderRadius: 12,
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 8,
+  },
+  modalText: {
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    fontSize: 16,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+  },
+  modalButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   statCard: {
     flexDirection: 'row',

@@ -1,6 +1,9 @@
 package http
 
 import (
+	"corp-messenger/backend/internal/auth"
+	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/websocket"
 	"io"
 	"net/http"
 	"os"
@@ -8,9 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"corp-messenger/backend/internal/auth"
-	"corp-messenger/backend/internal/models"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -37,7 +37,7 @@ func isValidPhone(phone string) bool {
 func (h *Handler) getUsers(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -55,40 +55,34 @@ func (h *Handler) getUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := h.storage.GetUsers(r.Context(), search, claims.UserID.String(), limit)
 	if err != nil {
 		h.logger.Error("failed to get users", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get users")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get users")
 		return
 	}
 	WriteJSON(w, http.StatusOK, users)
 }
 
 func (h *Handler) getUserByID(w http.ResponseWriter, r *http.Request) {
-	claims, ok := auth.ClaimsFromContext(r.Context())
+	_, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	idStr := chi.URLParam(r, "id")
 	id, err := uuid.Parse(idStr)
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid user ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid user ID")
 		return
 	}
 
 	user, err := h.storage.GetUserByID(r.Context(), id)
 	if err != nil {
 		h.logger.Error("failed to get user", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get user")
 		return
 	}
 	if user == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "User not found")
-		return
-	}
-
-	// Users can only view their own profile
-	if user.ID != claims.UserID {
-		WriteError(w, http.StatusForbidden, "forbidden", "You can only view your own profile")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "User not found")
 		return
 	}
 
@@ -98,7 +92,7 @@ func (h *Handler) getUserByID(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -113,7 +107,7 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := decodeJSON(r.Body, &updates); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
@@ -128,36 +122,36 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	// Validate input lengths
 	maxNameLength := 100
 	if len(updates.FirstName) > maxNameLength {
-		WriteError(w, http.StatusBadRequest, "first_name_too_long", "First name is too long")
+		WriteErrorCode(w, http.StatusBadRequest, "first_name_too_long", "First name is too long")
 		return
 	}
 	if len(updates.LastName) > maxNameLength {
-		WriteError(w, http.StatusBadRequest, "last_name_too_long", "Last name is too long")
+		WriteErrorCode(w, http.StatusBadRequest, "last_name_too_long", "Last name is too long")
 		return
 	}
 	if len(updates.MiddleName) > maxNameLength {
-		WriteError(w, http.StatusBadRequest, "middle_name_too_long", "Middle name is too long")
+		WriteErrorCode(w, http.StatusBadRequest, "middle_name_too_long", "Middle name is too long")
 		return
 	}
 	if len(updates.Avatar) > 2048 {
-		WriteError(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long (max 2048 characters)")
+		WriteErrorCode(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long (max 2048 characters)")
 		return
 	}
 
 	// Basic phone validation (if provided)
 	if updates.Phone != "" && !isValidPhone(updates.Phone) {
-		WriteError(w, http.StatusBadRequest, "invalid_phone", "Invalid phone number format")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_phone", "Invalid phone number format")
 		return
 	}
 
 	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
 	if err != nil {
 		h.logger.Error("failed to get user by ID", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get user")
 		return
 	}
 	if user == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "User not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "User not found")
 		return
 	}
 
@@ -181,7 +175,7 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
 		h.logger.Error("failed to update user", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update user")
 		return
 	}
 
@@ -191,7 +185,7 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -200,13 +194,13 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 
 	// Parse multipart form (max 32MB in memory)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_form", "Failed to parse form")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_form", "Failed to parse form")
 		return
 	}
 
 	file, header, err := r.FormFile("avatar")
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "missing_file", "Avatar file is required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_file", "Avatar file is required")
 		return
 	}
 	defer file.Close()
@@ -221,26 +215,26 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	contentType := header.Header.Get("Content-Type")
 	if !allowedTypes[contentType] {
-		WriteError(w, http.StatusBadRequest, "invalid_type", "Only image files (JPEG, PNG, GIF, WebP) are allowed")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_type", "Only image files (JPEG, PNG, GIF, WebP) are allowed")
 		return
 	}
 
 	// Read file content
 	content, err := io.ReadAll(file)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "read_error", "Failed to read file")
+		WriteErrorCode(w, http.StatusInternalServerError, "read_error", "Failed to read file")
 		return
 	}
 
 	// Validate file size after reading (double-check)
 	if len(content) > 5*1024*1024 {
-		WriteError(w, http.StatusBadRequest, "file_too_large", "File size exceeds 5MB limit")
+		WriteErrorCode(w, http.StatusBadRequest, "file_too_large", "File size exceeds 5MB limit")
 		return
 	}
 
 	// Validate actual file content using magic bytes
 	if len(content) < 4 {
-		WriteError(w, http.StatusBadRequest, "invalid_file", "File is too small to be a valid image")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file", "File is too small to be a valid image")
 		return
 	}
 
@@ -271,7 +265,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !validMagic {
-		WriteError(w, http.StatusBadRequest, "invalid_content", "File content does not match declared type")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_content", "File content does not match declared type")
 		return
 	}
 
@@ -279,7 +273,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	avatarsDir := "./uploads/avatars"
 	if err := os.MkdirAll(avatarsDir, 0755); err != nil {
 		h.logger.Error("failed to create avatars directory", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
 		return
 	}
 
@@ -298,11 +292,11 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	// Delete old avatar if it exists
 	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get user")
 		return
 	}
 	if user == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "User not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "User not found")
 		return
 	}
 
@@ -319,7 +313,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	// Save file to disk
 	if err := os.WriteFile(fullPath, content, 0644); err != nil {
 		h.logger.Error("failed to save avatar file", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
 		return
 	}
 
@@ -328,7 +322,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	user.Avatar = &avatarURL
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
 		h.logger.Error("failed to update user", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update user")
 		return
 	}
 
@@ -338,20 +332,20 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	chatID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_id", "Invalid chat ID")
 		return
 	}
 
 	// Verify user is a member and has permission (owner/admin)
 	members, err := h.storage.GetChatMembers(r.Context(), chatID)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
 		return
 	}
 
@@ -366,12 +360,12 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !isMember {
-		WriteError(w, http.StatusForbidden, "forbidden", "Not a member of this chat")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Not a member of this chat")
 		return
 	}
 
 	if callerRole != models.ChatRoleOwner && callerRole != models.ChatRoleAdmin {
-		WriteError(w, http.StatusForbidden, "forbidden", "Only owner or admin can update chat avatar")
+		WriteErrorCode(w, http.StatusForbidden, "forbidden", "Only owner or admin can update chat avatar")
 		return
 	}
 
@@ -379,13 +373,13 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 5*1024*1024)
 
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_form", "Failed to parse form")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_form", "Failed to parse form")
 		return
 	}
 
 	file, header, err := r.FormFile("avatar")
 	if err != nil {
-		WriteError(w, http.StatusBadRequest, "missing_file", "Avatar file is required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_file", "Avatar file is required")
 		return
 	}
 	defer file.Close()
@@ -399,26 +393,26 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	contentType := header.Header.Get("Content-Type")
 	if !allowedTypes[contentType] {
-		WriteError(w, http.StatusBadRequest, "invalid_type", "Only image files (JPEG, PNG, GIF, WebP) are allowed")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_type", "Only image files (JPEG, PNG, GIF, WebP) are allowed")
 		return
 	}
 
 	// Read file content
 	content, err := io.ReadAll(file)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "read_error", "Failed to read file")
+		WriteErrorCode(w, http.StatusInternalServerError, "read_error", "Failed to read file")
 		return
 	}
 
 	// Validate file size after reading (double-check)
 	if len(content) > 5*1024*1024 {
-		WriteError(w, http.StatusBadRequest, "file_too_large", "File size exceeds 5MB limit")
+		WriteErrorCode(w, http.StatusBadRequest, "file_too_large", "File size exceeds 5MB limit")
 		return
 	}
 
 	// Validate actual file content using magic bytes
 	if len(content) < 4 {
-		WriteError(w, http.StatusBadRequest, "invalid_file", "File is too small to be a valid image")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_file", "File is too small to be a valid image")
 		return
 	}
 
@@ -449,7 +443,7 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !validMagic {
-		WriteError(w, http.StatusBadRequest, "invalid_content", "File content does not match declared type")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_content", "File content does not match declared type")
 		return
 	}
 
@@ -457,7 +451,7 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	avatarsDir := "./uploads/avatars"
 	if err := os.MkdirAll(avatarsDir, 0755); err != nil {
 		h.logger.Error("failed to create avatars directory", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
 		return
 	}
 
@@ -475,11 +469,11 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	// Delete old avatar if it exists
 	chat, err := h.storage.GetChatByID(r.Context(), chatID)
 	if err != nil {
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get chat")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat")
 		return
 	}
 	if chat == nil {
-		WriteError(w, http.StatusNotFound, "not_found", "Chat not found")
+		WriteErrorCode(w, http.StatusNotFound, "not_found", "Chat not found")
 		return
 	}
 
@@ -496,7 +490,7 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	// Save file to disk
 	if err := os.WriteFile(fullPath, content, 0644); err != nil {
 		h.logger.Error("failed to save chat avatar file", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to save avatar")
 		return
 	}
 
@@ -505,7 +499,7 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 	chat.Avatar = avatarURL
 	if err := h.storage.UpdateChat(r.Context(), chat); err != nil {
 		h.logger.Error("failed to update chat avatar", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update chat avatar")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update chat avatar")
 		return
 	}
 
@@ -515,7 +509,7 @@ func (h *Handler) uploadChatAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -526,27 +520,39 @@ func (h *Handler) updateUserStatus(w http.ResponseWriter, r *http.Request) {
 		CustomStatus string `json:"custom_status"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	validStatuses := map[string]bool{"online": true, "away": true, "busy": true, "invisible": true}
 	if req.Status != "" && !validStatuses[req.Status] {
-		WriteError(w, http.StatusBadRequest, "invalid_status", "Invalid status value")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_status", "Invalid status value")
 		return
 	}
 
 	// Validate custom status length
 	if req.CustomStatus != "" && len(req.CustomStatus) > 200 {
-		WriteError(w, http.StatusBadRequest, "custom_status_too_long", "Custom status exceeds maximum length (200 characters)")
+		WriteErrorCode(w, http.StatusBadRequest, "custom_status_too_long", "Custom status exceeds maximum length (200 characters)")
 		return
 	}
 
 	if err := h.storage.UpdateUserStatus(r.Context(), claims.UserID, req.Status, req.CustomStatus); err != nil {
 		h.logger.Error("failed to update user status", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update status")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update status")
 		return
+	}
+
+	// Broadcast status change to all connected users
+	if h.hub != nil {
+		h.hub.BroadcastToAll(&websocket.BroadcastMessage{
+			Type: websocket.EventPresence,
+			Payload: map[string]interface{}{
+				"user_id":       claims.UserID,
+				"status":        req.Status,
+				"custom_status": req.CustomStatus,
+			},
+		})
 	}
 
 	WriteJSON(w, http.StatusOK, map[string]string{"status": "updated"})

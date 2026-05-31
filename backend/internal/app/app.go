@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -159,7 +160,7 @@ func New() (*App, error) {
 		logg.Info("Scheduler started")
 	}
 
-	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub, notificationSvc, cfg.BaseURL, cfg.RateLimitRequests, cfg.RateLimitWindow, cfg.MaxRateLimitEntries, syncService, cfg.TURNServerURI, cfg.TURNUsername, cfg.TURNPassword, lk)
+	handler := apphttp.NewHandler(logg.Handler(), stg, ejb, jwtSecret, cfg.CORSOrigins, time.Duration(cfg.SessionDurationHours)*time.Hour, hub, notificationSvc, cfg.BaseURL, cfg.RateLimitRequests, cfg.RateLimitWindow, cfg.MaxRateLimitEntries, syncService, cfg.TURNServerURI, cfg.TURNUsername, cfg.TURNPassword, lk, cfg.RedisURL)
 
 	// Start rate limiter cleanup goroutine to prevent memory exhaustion
 	apphttp.StartRateLimitCleanup()
@@ -191,6 +192,9 @@ func New() (*App, error) {
 		WriteTimeout:      30 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    1 << 20, // 1 MB
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS13,
+		},
 	}
 
 	// Configure TLS if enabled

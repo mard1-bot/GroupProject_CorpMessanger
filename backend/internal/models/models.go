@@ -9,6 +9,7 @@ import (
 type User struct {
 	ID           uuid.UUID  `json:"id" db:"id"`
 	Email        string     `json:"email" db:"email"`
+	Username     *string    `json:"username,omitempty" db:"username"`
 	Phone        string     `json:"phone,omitempty" db:"phone"`
 	FirstName    string     `json:"first_name" db:"first_name"`
 	LastName     string     `json:"last_name" db:"last_name"`
@@ -36,16 +37,27 @@ type WebPushSubscription struct {
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
+type TwoFactorSettings struct {
+	UserID      uuid.UUID `json:"user_id" db:"user_id"`
+	Secret      string    `json:"-" db:"secret"`       // Не возвращаем клиенту
+	BackupCodes []string  `json:"-" db:"backup_codes"` // Храним хеши
+	Enabled     bool      `json:"enabled" db:"enabled"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
 type Chat struct {
-	ID          uuid.UUID     `json:"id" db:"id"`
-	Type        string        `json:"type" db:"type"`
-	Title       string        `json:"title,omitempty" db:"title"`
-	Description string        `json:"description,omitempty" db:"description"`
-	Avatar      string        `json:"avatar,omitempty" db:"avatar"`
-	CreatorID   uuid.UUID     `json:"creator_id" db:"creator_id"`
-	CreatedAt   time.Time     `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at" db:"updated_at"`
-	Members     []*ChatMember `json:"members,omitempty" db:"-"`
+	ID            uuid.UUID     `json:"id" db:"id"`
+	Type          string        `json:"type" db:"type"`
+	Title         string        `json:"title,omitempty" db:"title"`
+	Description   string        `json:"description,omitempty" db:"description"`
+	Avatar        string        `json:"avatar,omitempty" db:"avatar"`
+	CreatorID     uuid.UUID     `json:"creator_id" db:"creator_id"`
+	CreatedAt     time.Time     `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time     `json:"updated_at" db:"updated_at"`
+	LastMessage   *string       `json:"last_message,omitempty" db:"-"`
+	LastMessageAt *time.Time    `json:"last_message_at,omitempty" db:"-"`
+	Members       []*ChatMember `json:"members,omitempty" db:"-"`
 }
 
 type ChatMember struct {
@@ -157,6 +169,7 @@ type NotificationSettings struct {
 	QuietHoursEnd      *string   `json:"quiet_hours_end,omitempty" db:"quiet_hours_end"`
 	QuietHoursEnabled  bool      `json:"quiet_hours_enabled" db:"quiet_hours_enabled"`
 	ProtocolPreference string    `json:"protocol_preference" db:"protocol_preference"` // "websocket" or "xmpp"
+	HybridModeEnabled  bool      `json:"hybrid_mode_enabled" db:"hybrid_mode_enabled"` // Enable XMPP hybrid mode
 	UpdatedAt          time.Time `json:"updated_at" db:"updated_at"`
 }
 
@@ -177,6 +190,17 @@ type AuditLog struct {
 	IPAddress  string    `json:"ip_address,omitempty" db:"ip_address"`
 	UserAgent  string    `json:"user_agent,omitempty" db:"user_agent"`
 	CreatedAt  time.Time `json:"created_at" db:"created_at"`
+}
+
+type AdminStats struct {
+	TotalUsers     int `json:"total_users"`
+	ActiveUsers    int `json:"active_users"`
+	BlockedUsers   int `json:"blocked_users"`
+	AdminCount     int `json:"admin_count"`
+	ModeratorCount int `json:"moderator_count"`
+	TotalChats     int `json:"total_chats"`
+	TotalMessages  int `json:"total_messages"`
+	OnlineUsers    int `json:"online_users"`
 }
 
 const (
@@ -202,3 +226,34 @@ const (
 	MessageTypeVoice = "voice"
 	MessageTypeVideo = "video"
 )
+
+// UserConsent represents user consent for data processing (GDPR/152-ФЗ)
+type UserConsent struct {
+	ID             uuid.UUID `json:"id" db:"id"`
+	UserID         uuid.UUID `json:"user_id" db:"user_id"`
+	ConsentType    string    `json:"consent_type" db:"consent_type"` // 'data_processing', 'marketing', 'analytics'
+	ConsentGiven   bool      `json:"consent_given" db:"consent_given"`
+	ConsentText    string    `json:"consent_text" db:"consent_text"`       // The exact text user agreed to
+	ConsentVersion string    `json:"consent_version" db:"consent_version"` // Version of consent text
+	IPAddress      string    `json:"ip_address,omitempty" db:"ip_address"`
+	UserAgent      string    `json:"user_agent,omitempty" db:"user_agent"`
+	ConsentedAt    time.Time `json:"consented_at" db:"consented_at"`
+	RevokedAt      time.Time `json:"revoked_at,omitempty" db:"revoked_at"`
+	CreatedAt      time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// DataExportRequest represents a user request to export or delete their data
+type DataExportRequest struct {
+	ID          uuid.UUID `json:"id" db:"id"`
+	UserID      uuid.UUID `json:"user_id" db:"user_id"`
+	RequestType string    `json:"request_type" db:"request_type"` // 'export' or 'delete'
+	Status      string    `json:"status" db:"status"`             // 'pending', 'processing', 'completed', 'failed'
+	RequestedAt time.Time `json:"requested_at" db:"requested_at"`
+	CompletedAt time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	ExportURL   string    `json:"export_url,omitempty" db:"export_url"` // URL for downloading exported data
+	ExpiresAt   time.Time `json:"expires_at,omitempty" db:"expires_at"` // Export link expiration
+	ErrorMsg    string    `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}

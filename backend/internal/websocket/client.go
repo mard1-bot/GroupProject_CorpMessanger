@@ -196,6 +196,28 @@ func (c *Client) writePump() {
 
 // handleMessage processes messages from the client.
 func (c *Client) handleMessage(msg *WSMessage) {
+	// Skip rate limiting for certain message types
+	skipRateLimit := msg.Type == "ping" || msg.Type == "pong"
+
+	// Check rate limit for user actions
+	if !skipRateLimit && !c.hub.rateLimiter.Allow(c.UserID) {
+		// Send rate limit error to client
+		errorMsg := &BroadcastMessage{
+			Type: "error",
+			Payload: map[string]interface{}{
+				"code":    "RATE_LIMIT_EXCEEDED",
+				"message": "Too many messages. Please slow down.",
+			},
+		}
+		select {
+		case c.send <- errorMsg:
+		default:
+			// Channel full, skip error message
+		}
+		log.Printf("[WebSocket] Rate limit exceeded for user %s (type: %s)", c.UserID, msg.Type)
+		return
+	}
+
 	switch msg.Type {
 	case "ping":
 		// Respond with pong to keep connection alive
@@ -260,6 +282,12 @@ func (c *Client) handleMessage(msg *WSMessage) {
 			ExcludeSender: &c.UserID,
 		})
 
+	// Load chats synchronously
+	case "load_chats":
+		c.hub.HandleLoadChats(c)
+	// Load messages synchronously
+	case "load_messages":
+		c.hub.HandleLoadMessages(c, msg.Payload)
 	// WebRTC call events
 	case EventCallOffer:
 		c.hub.HandleCallOffer(c, msg.Payload)

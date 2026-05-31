@@ -13,6 +13,7 @@
 .env
 .env.local
 .env.production
+.env.secrets
 
 # Secrets directory
 .secrets/
@@ -70,3 +71,6 @@ coverage.out
 
 # Lock files
 *.lock
+
+# Random files
+client/go.mod

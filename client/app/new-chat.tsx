@@ -21,6 +21,7 @@ import { useDebounce } from '@/hooks/use-debounce';
 interface User {
   id: string;
   email: string;
+  username?: string;
   first_name: string;
   last_name: string;
   avatar?: string;
@@ -55,10 +56,12 @@ export default function NewChatScreen() {
   }, [debouncedSearch]);
 
   const searchUsers = async (query: string) => {
-    console.log('Searching for:', query);
+    // Strip leading @ for username search
+    const cleanQuery = query.startsWith('@') ? query.slice(1) : query;
+    console.log('Searching for:', cleanQuery);
     setLoading(true);
     try {
-      const response = await api.getUsers(query, 20);
+      const response = await api.getUsers(cleanQuery, 20);
       console.log('Search response:', response);
       if (response.data) {
         console.log('Found users:', response.data.length, response.data);
@@ -140,7 +143,7 @@ export default function NewChatScreen() {
             {item.first_name} {item.last_name}
           </ThemedText>
           <ThemedText style={[styles.userEmail, { color: textColor + '80' }]}>
-            {item.email}
+            {item.username ? '@' + item.username : item.email}
           </ThemedText>
         </View>
         {selected && (

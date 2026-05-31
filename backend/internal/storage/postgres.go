@@ -7,15 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"corp-messenger/backend/internal/models"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type PostgresStorage struct {
@@ -48,18 +50,44 @@ func NewPostgres(dsn string) (*PostgresStorage, error) {
 }
 
 func (s *PostgresStorage) migrate() error {
-	// Note: This function creates only the base schema from 001_initial.sql
-	// Additional schema changes should be applied via migration files
-	// to ensure consistency across environments
+	// Create base schema first
+	if err := s.createBaseSchema(); err != nil {
+		return fmt.Errorf("create base schema: %w", err)
+	}
+
+	// Run migration files
+	if err := s.runMigrations(); err != nil {
+		return fmt.Errorf("run migrations: %w", err)
+	}
+
+	return nil
+}
+
+func (s *PostgresStorage) createBaseSchema() error {
 	schema := `
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
+    phone VARCHAR(50),
     first_name VARCHAR(100),
     last_name VARCHAR(100),
+    middle_name VARCHAR(100),
+    avatar VARCHAR(500),
     status VARCHAR(20) DEFAULT 'active',
+    custom_status VARCHAR(200),
     role VARCHAR(20) DEFAULT 'user',
+    last_online TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+CREATE TABLE IF NOT EXISTS user_credentials (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    password_hash VARCHAR(255) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -68,6 +96,8 @@ CREATE TABLE IF NOT EXISTS chats (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     type VARCHAR(20) NOT NULL,
     title VARCHAR(255),
+    description TEXT,
+    avatar VARCHAR(500),
     creator_id UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -79,6 +109,11 @@ CREATE TABLE IF NOT EXISTS chat_members (
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     role VARCHAR(20) DEFAULT 'member',
     joined_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_read_at TIMESTAMP WITH TIME ZONE,
+    muted BOOLEAN DEFAULT false,
+    pinned BOOLEAN DEFAULT false,
+    archived BOOLEAN DEFAULT false,
+    deleted_at TIMESTAMP WITH TIME ZONE,
     UNIQUE(chat_id, user_id)
 );
 
@@ -90,16 +125,24 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     file_url TEXT,
     reply_to UUID REFERENCES messages(id) ON DELETE SET NULL,
+    reply_to_content TEXT,
+    reply_to_sender_name VARCHAR(255),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    read_by UUID[],
+    pinned BOOLEAN DEFAULT false,
+    duration FLOAT,
+    scheduled_at TIMESTAMP WITH TIME ZONE,
+    thread_id UUID REFERENCES messages(id) ON DELETE CASCADE,
+    forwarded_from UUID REFERENCES users(id) ON DELETE SET NULL,
+    forwarded_sender_name VARCHAR(255),
+    encrypted_content TEXT,
+    encryption_key_id UUID,
+    encrypted_keys JSONB,
+    location JSONB,
+    synced_to_xmpp BOOLEAN DEFAULT false,
+    xmpp_message_id VARCHAR(255)
 );
-
--- Note: forwarded_from and forwarded_sender_name columns are added via migration 023_forwarded_message_fields.sql
--- The DO block has been removed to prevent race conditions during concurrent migrations.
--- Ensure migrations are run before starting the application.
-
--- Create index for forwarded_from if it doesn't exist
-CREATE INDEX IF NOT EXISTS idx_messages_forwarded_from ON messages(forwarded_from) WHERE forwarded_from IS NOT NULL;
 
 -- Create notification_settings table if it doesn't exist
 CREATE TABLE IF NOT EXISTS notification_settings (
@@ -113,9 +156,6 @@ CREATE TABLE IF NOT EXISTS notification_settings (
     protocol_preference VARCHAR(20) DEFAULT 'websocket',
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
-
--- Note: protocol_preference column addition moved to dedicated migration 022_protocol_preference.sql
--- to prevent race conditions during concurrent migrations.
 
 CREATE TABLE IF NOT EXISTS files (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -132,9 +172,90 @@ CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_members_chat_id ON chat_members(chat_id);
 CREATE INDEX IF NOT EXISTS idx_chat_members_user_id ON chat_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_files_message_id ON files(message_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token VARCHAR(500) NOT NULL UNIQUE,
+    device_info TEXT,
+    ip VARCHAR(45),
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
 `
 	_, err := s.db.Exec(schema)
 	return err
+}
+
+func (s *PostgresStorage) runMigrations() error {
+	// Create migrations table if it doesn't exist
+	migrationTableSQL := `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(255) PRIMARY KEY,
+    applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);`
+	if _, err := s.db.Exec(migrationTableSQL); err != nil {
+		return fmt.Errorf("create migrations table: %w", err)
+	}
+
+	// Get list of migration files - only include tables not in base schema
+	migrationFiles := []string{
+		"003_message_reads.sql",
+		"006_audit_logs.sql",
+		"010_mentions.sql",
+		"011_encryption_keys.sql",
+		"013_bookmarks_blocked_deleted.sql",
+		"015_reactions.sql",
+		"021_web_push_subscriptions.sql",
+		"024_xmpp_reconciliation.sql",
+		"025_xmpp_sync_dead_letter.sql",
+		"026_scheduler_failures.sql",
+		"027_login_attempts.sql",
+		"029_two_factor_auth.sql",
+		"031_key_rotation.sql",
+		"031_move_password_to_credentials.sql",
+		"032_gdpr_consent.sql",
+		"033_fix_schema_gaps.sql",
+		"034_ensure_all_columns.sql",
+	}
+
+	for _, filename := range migrationFiles {
+		// Check if migration is already applied
+		var applied bool
+		err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)", filename).Scan(&applied)
+		if err != nil {
+			return fmt.Errorf("check migration %s: %w", filename, err)
+		}
+
+		if applied {
+			continue // Migration already applied
+		}
+
+		// Read and execute migration file
+		migrationPath := fmt.Sprintf("migrations/%s", filename)
+		migrationSQL, err := os.ReadFile(migrationPath)
+		if err != nil {
+			log.Printf("Warning: Could not read migration file %s: %v", filename, err)
+			continue
+		}
+
+		// Execute migration
+		if _, err := s.db.Exec(string(migrationSQL)); err != nil {
+			return fmt.Errorf("execute migration %s: %w", filename, err)
+		}
+
+		// Mark migration as applied
+		if _, err := s.db.Exec("INSERT INTO schema_migrations (version) VALUES ($1)", filename); err != nil {
+			return fmt.Errorf("record migration %s: %w", filename, err)
+		}
+
+		log.Printf("Applied migration: %s", filename)
+	}
+
+	return nil
 }
 
 func (s *PostgresStorage) Ready(ctx context.Context) error {
@@ -240,14 +361,15 @@ func (s *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*mo
 	var middleName, phone, avatar sql.NullString
 
 	query := `
-		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name,
+		SELECT u.id, u.email, u.username, u.phone, u.first_name, u.last_name, u.middle_name,
 		       u.avatar, u.status, u.role, u.created_at, u.updated_at, u.last_online, uc.password_hash
 		FROM users u
 		JOIN user_credentials uc ON u.id = uc.user_id
 		WHERE u.email = $1
 	`
+	var username sql.NullString
 	err := s.db.QueryRowContext(ctx, query, email).Scan(
-		&user.ID, &user.Email, &phone, &user.FirstName, &user.LastName,
+		&user.ID, &user.Email, &username, &phone, &user.FirstName, &user.LastName,
 		&middleName, &avatar, &user.Status, &user.Role,
 		&user.CreatedAt, &user.UpdatedAt, &user.LastOnline, &passwordHash,
 	)
@@ -258,6 +380,9 @@ func (s *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*mo
 		return nil, "", err
 	}
 
+	if username.Valid {
+		user.Username = &username.String
+	}
 	if middleName.Valid {
 		user.MiddleName = &middleName.String
 	}
@@ -276,12 +401,13 @@ func (s *PostgresStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model
 	var middleName, phone, avatar sql.NullString
 
 	query := `
-		SELECT id, email, phone, first_name, last_name, middle_name,
+		SELECT id, email, username, phone, first_name, last_name, middle_name,
 		       avatar, status, role, created_at, updated_at, last_online
 		FROM users WHERE id = $1
 	`
+	var username sql.NullString
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&user.ID, &user.Email, &phone, &user.FirstName, &user.LastName,
+		&user.ID, &user.Email, &username, &phone, &user.FirstName, &user.LastName,
 		&middleName, &avatar, &user.Status, &user.Role,
 		&user.CreatedAt, &user.UpdatedAt, &user.LastOnline,
 	)
@@ -292,6 +418,46 @@ func (s *PostgresStorage) GetUserByID(ctx context.Context, id uuid.UUID) (*model
 		return nil, err
 	}
 
+	if username.Valid {
+		user.Username = &username.String
+	}
+	if middleName.Valid {
+		user.MiddleName = &middleName.String
+	}
+	if phone.Valid {
+		user.Phone = phone.String
+	}
+	if avatar.Valid {
+		user.Avatar = &avatar.String
+	}
+
+	return user, nil
+}
+
+func (s *PostgresStorage) GetUserByUsername(ctx context.Context, username string) (*models.User, error) {
+	user := &models.User{}
+	var middleName, phone, avatar, uname sql.NullString
+
+	query := `
+		SELECT id, email, username, phone, first_name, last_name, middle_name,
+		       avatar, status, role, created_at, updated_at, last_online
+		FROM users WHERE LOWER(username) = LOWER($1)
+	`
+	err := s.db.QueryRowContext(ctx, query, username).Scan(
+		&user.ID, &user.Email, &uname, &phone, &user.FirstName, &user.LastName,
+		&middleName, &avatar, &user.Status, &user.Role,
+		&user.CreatedAt, &user.UpdatedAt, &user.LastOnline,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if uname.Valid {
+		user.Username = &uname.String
+	}
 	if middleName.Valid {
 		user.MiddleName = &middleName.String
 	}
@@ -311,15 +477,16 @@ func (s *PostgresStorage) GetUserByIDWithPassword(ctx context.Context, id uuid.U
 	var passwordHash sql.NullString
 
 	query := `
-		SELECT u.id, u.email, u.phone, u.first_name, u.last_name, u.middle_name,
+		SELECT u.id, u.email, u.username, u.phone, u.first_name, u.last_name, u.middle_name,
 		       u.avatar, u.status, u.role, u.created_at, u.updated_at, u.last_online,
 		       p.password_hash
 		FROM users u
 		LEFT JOIN user_credentials p ON u.id = p.user_id
 		WHERE u.id = $1
 	`
+	var username sql.NullString
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&user.ID, &user.Email, &phone, &user.FirstName, &user.LastName,
+		&user.ID, &user.Email, &username, &phone, &user.FirstName, &user.LastName,
 		&middleName, &avatar, &user.Status, &user.Role,
 		&user.CreatedAt, &user.UpdatedAt, &user.LastOnline,
 		&passwordHash,
@@ -331,6 +498,9 @@ func (s *PostgresStorage) GetUserByIDWithPassword(ctx context.Context, id uuid.U
 		return nil, "", err
 	}
 
+	if username.Valid {
+		user.Username = &username.String
+	}
 	if middleName.Valid {
 		user.MiddleName = &middleName.String
 	}
@@ -352,13 +522,17 @@ func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) err
 	// Email, status, and role require separate admin endpoints
 	query := `
 		UPDATE users SET
-			phone = $1, first_name = $2, last_name = $3,
-			middle_name = $4, avatar = $5,
+			username = $1, phone = $2, first_name = $3, last_name = $4,
+			middle_name = $5, avatar = $6,
 			updated_at = NOW()
-		WHERE id = $6
+		WHERE id = $7
 		RETURNING updated_at
 	`
-	var middleName, avatar sql.NullString
+	var username, middleName, avatar sql.NullString
+	if user.Username != nil {
+		username.String = *user.Username
+		username.Valid = true
+	}
 	if user.MiddleName != nil {
 		middleName.String = *user.MiddleName
 		middleName.Valid = true
@@ -368,7 +542,7 @@ func (s *PostgresStorage) UpdateUser(ctx context.Context, user *models.User) err
 		avatar.Valid = true
 	}
 	err := s.db.QueryRowContext(ctx, query,
-		user.Phone, user.FirstName, user.LastName,
+		username, user.Phone, user.FirstName, user.LastName,
 		middleName, avatar, user.ID,
 	).Scan(&user.UpdatedAt)
 	return err
@@ -418,19 +592,19 @@ func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUs
 		argIdx++
 	}
 
-	// Add search filter (email, first_name, last_name)
+	// Add search filter (email, first_name, last_name, username)
 	if search != "" {
 		searchPattern := "%" + strings.ToLower(search) + "%"
-		whereClause += fmt.Sprintf(" AND (LOWER(email) LIKE $%d OR LOWER(first_name) LIKE $%d OR LOWER(last_name) LIKE $%d)", argIdx, argIdx+1, argIdx+2)
-		args = append(args, searchPattern, searchPattern, searchPattern)
-		argIdx += 3
+		whereClause += fmt.Sprintf(" AND (LOWER(email) LIKE $%d OR LOWER(first_name) LIKE $%d OR LOWER(last_name) LIKE $%d OR LOWER(username) LIKE $%d)", argIdx, argIdx+1, argIdx+2, argIdx+3)
+		args = append(args, searchPattern, searchPattern, searchPattern, searchPattern)
+		argIdx += 4
 	}
 
 	// Add limit
 	args = append(args, limit)
 
 	query := fmt.Sprintf(`
-		SELECT id, email, phone, first_name, last_name, middle_name,
+		SELECT id, email, username, phone, first_name, last_name, middle_name,
 		       avatar, status, role, created_at, updated_at, last_online
 		FROM users %s
 		ORDER BY created_at DESC
@@ -446,9 +620,9 @@ func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUs
 	users := make([]*models.User, 0)
 	for rows.Next() {
 		user := &models.User{}
-		var middleName, phone, avatar sql.NullString
+		var username, middleName, phone, avatar sql.NullString
 		err := rows.Scan(
-			&user.ID, &user.Email, &phone, &user.FirstName, &user.LastName,
+			&user.ID, &user.Email, &username, &phone, &user.FirstName, &user.LastName,
 			&middleName, &avatar, &user.Status, &user.Role,
 			&user.CreatedAt, &user.UpdatedAt, &user.LastOnline,
 		)
@@ -456,6 +630,9 @@ func (s *PostgresStorage) GetUsers(ctx context.Context, search string, excludeUs
 			return nil, err
 		}
 
+		if username.Valid {
+			user.Username = &username.String
+		}
 		if middleName.Valid {
 			user.MiddleName = &middleName.String
 		}
@@ -589,13 +766,20 @@ func (s *PostgresStorage) UpdateChat(ctx context.Context, chat *models.Chat) err
 }
 
 func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([]*models.Chat, error) {
-	// Get chats excluding archived and soft-deleted
+	// Get chats excluding archived and soft-deleted, sorted by last message time
 	query := `
-		SELECT c.id, c.type, c.title, c.description, c.avatar, c.creator_id, c.created_at, c.updated_at
+		SELECT c.id, c.type, c.title, c.description, c.avatar, c.creator_id, c.created_at, c.updated_at,
+		       lm.last_msg_at, lm_last_msg.content as last_message
 		FROM chats c
 		JOIN chat_members cm ON c.id = cm.chat_id
+		LEFT JOIN (
+			SELECT chat_id, MAX(created_at) AS last_msg_at
+			FROM messages
+			GROUP BY chat_id
+		) lm ON c.id = lm.chat_id
+		LEFT JOIN messages lm_last_msg ON lm_last_msg.chat_id = c.id AND lm_last_msg.created_at = lm.last_msg_at
 		WHERE cm.user_id = $1 AND cm.archived = false AND cm.deleted_at IS NULL
-		ORDER BY c.updated_at DESC
+		ORDER BY COALESCE(lm.last_msg_at, c.created_at) DESC
 	`
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
@@ -606,12 +790,21 @@ func (s *PostgresStorage) GetUserChats(ctx context.Context, userID uuid.UUID) ([
 	var chats []*models.Chat
 	for rows.Next() {
 		chat := &models.Chat{}
+		var lastMsgAt sql.NullTime
+		var lastMessage sql.NullString
 		err := rows.Scan(
 			&chat.ID, &chat.Type, &chat.Title, &chat.Description, &chat.Avatar,
 			&chat.CreatorID, &chat.CreatedAt, &chat.UpdatedAt,
+			&lastMsgAt, &lastMessage,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if lastMsgAt.Valid {
+			chat.LastMessageAt = &lastMsgAt.Time
+		}
+		if lastMessage.Valid {
+			chat.LastMessage = &lastMessage.String
 		}
 		chats = append(chats, chat)
 	}
@@ -675,7 +868,7 @@ func (s *PostgresStorage) GetChatMembers(ctx context.Context, chatID uuid.UUID) 
 func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uuid.UUID) ([]*models.ChatMember, error) {
 	query := `
 		SELECT cm.chat_id, cm.user_id, cm.role, cm.joined_at, cm.last_read_at, cm.muted, cm.pinned, cm.archived, cm.deleted_at,
-			u.id, u.email, u.first_name, u.last_name, u.middle_name, u.avatar, u.status, u.role, u.created_at, u.updated_at, u.last_online
+			u.id, u.email, u.username, u.first_name, u.last_name, u.middle_name, u.avatar, u.status, u.role, u.created_at, u.updated_at, u.last_online
 		FROM chat_members cm
 		JOIN users u ON cm.user_id = u.id
 		WHERE cm.chat_id = $1
@@ -690,13 +883,16 @@ func (s *PostgresStorage) GetChatMembersWithUsers(ctx context.Context, chatID uu
 	for rows.Next() {
 		m := &models.ChatMember{}
 		u := &models.User{}
-		var middleName, avatar sql.NullString
+		var username, middleName, avatar sql.NullString
 		err := rows.Scan(
 			&m.ChatID, &m.UserID, &m.Role, &m.JoinedAt, &m.LastReadAt, &m.Muted, &m.Pinned, &m.Archived, &m.DeletedAt,
-			&u.ID, &u.Email, &u.FirstName, &u.LastName, &middleName, &avatar, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastOnline,
+			&u.ID, &u.Email, &username, &u.FirstName, &u.LastName, &middleName, &avatar, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastOnline,
 		)
 		if err != nil {
 			return nil, err
+		}
+		if username.Valid {
+			u.Username = &username.String
 		}
 		if middleName.Valid {
 			u.MiddleName = &middleName.String
@@ -886,8 +1082,8 @@ func (s *PostgresStorage) DeleteChat(ctx context.Context, chatID uuid.UUID) erro
 
 func (s *PostgresStorage) CreateMessage(ctx context.Context, msg *models.Message) error {
 	query := `
-		INSERT INTO messages (chat_id, sender_id, type, content, file_url, reply_to, encrypted_content, encrypted_keys, latitude, longitude, location_address, duration, forwarded_from, forwarded_sender_name, scheduled_at, thread_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		INSERT INTO messages (chat_id, sender_id, type, content, file_url, reply_to, encrypted_content, encrypted_keys, location, duration, forwarded_from, forwarded_sender_name, scheduled_at, thread_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id, created_at, updated_at
 	`
 	// Convert encrypted keys map to JSONB
@@ -900,15 +1096,14 @@ func (s *PostgresStorage) CreateMessage(ctx context.Context, msg *models.Message
 		encryptedKeysJSON = string(data)
 	}
 
-	// Extract location values
-	var latitude, longitude *float64
-	var locationAddress *string
+	// Convert location to JSONB
+	var locationJSON interface{}
 	if msg.Location != nil {
-		latitude = &msg.Location.Latitude
-		longitude = &msg.Location.Longitude
-		if msg.Location.Address != "" {
-			locationAddress = &msg.Location.Address
+		data, err := json.Marshal(msg.Location)
+		if err != nil {
+			return fmt.Errorf("marshal location: %w", err)
 		}
+		locationJSON = string(data)
 	}
 
 	// Convert forwarded fields to appropriate types
@@ -927,7 +1122,7 @@ func (s *PostgresStorage) CreateMessage(ctx context.Context, msg *models.Message
 	return s.db.QueryRowContext(ctx, query,
 		msg.ChatID, msg.SenderID, msg.Type, msg.Content, msg.FileURL, msg.ReplyTo,
 		msg.EncryptedContent, encryptedKeysJSON,
-		latitude, longitude, locationAddress, msg.Duration,
+		locationJSON, msg.Duration,
 		forwardedFrom, forwardedSenderName,
 		msg.ScheduledAt, msg.ThreadID).Scan(&msg.ID, &msg.CreatedAt, &msg.UpdatedAt)
 }
@@ -959,10 +1154,8 @@ func scanMessageWithEncryption(rows interface{ Scan(...interface{}) error }, m *
 	var replyTo sql.NullString
 	var fileURL sql.NullString
 	var encryptedContent sql.NullString
-	var encryptedKeysJSON sql.NullString
-	var latitude sql.NullFloat64
-	var longitude sql.NullFloat64
-	var locationAddress sql.NullString
+	var encryptedKeysJSON []byte
+	var locationJSON []byte
 	var duration sql.NullFloat64
 	var forwardedFrom sql.NullString
 	var forwardedSenderName sql.NullString
@@ -975,7 +1168,7 @@ func scanMessageWithEncryption(rows interface{ Scan(...interface{}) error }, m *
 	err := rows.Scan(&m.ID, &m.ChatID, &m.SenderID, &m.Type, &m.Content, &fileURL,
 		&m.CreatedAt, &m.UpdatedAt, &replyTo,
 		&encryptedContent, &encryptedKeysJSON,
-		&latitude, &longitude, &locationAddress, &duration,
+		&locationJSON, &duration,
 		&forwardedFrom, &forwardedSenderName,
 		&scheduledAt, &threadID, &syncedToXMPP, &xmppMessageID,
 		&replyToContent, &replyToSenderName)
@@ -1000,17 +1193,14 @@ func scanMessageWithEncryption(rows interface{ Scan(...interface{}) error }, m *
 	if encryptedContent.Valid {
 		m.EncryptedContent = encryptedContent.String
 	}
-	if encryptedKeysJSON.Valid && encryptedKeysJSON.String != "" {
-		if err := json.Unmarshal([]byte(encryptedKeysJSON.String), &m.EncryptedKeys); err != nil {
+	if encryptedKeysJSON != nil {
+		if err := json.Unmarshal(encryptedKeysJSON, &m.EncryptedKeys); err != nil {
 			log.Printf("[ERROR] Failed to unmarshal encrypted keys: %v", err)
-			// Continue with empty EncryptedKeys, but log the error
 		}
 	}
-	if latitude.Valid && longitude.Valid {
-		m.Location = &models.MessageLocation{
-			Latitude:  latitude.Float64,
-			Longitude: longitude.Float64,
-			Address:   locationAddress.String,
+	if locationJSON != nil {
+		if err := json.Unmarshal(locationJSON, &m.Location); err != nil {
+			log.Printf("[ERROR] Failed to unmarshal location: %v", err)
 		}
 	}
 	if duration.Valid {
@@ -1038,9 +1228,9 @@ func scanMessageWithEncryption(rows interface{ Scan(...interface{}) error }, m *
 	return nil
 }
 
-const messageColumns = `m.id, m.chat_id, m.sender_id, m.type, m.content, m.file_url, m.created_at, m.updated_at, m.reply_to, m.encrypted_content, m.encrypted_keys, m.latitude, m.longitude, m.location_address, m.duration, m.forwarded_from, m.forwarded_sender_name, m.scheduled_at, m.thread_id, m.synced_to_xmpp, m.xmpp_message_id, reply_msg.content as reply_to_content, reply_sender.first_name || ' ' || reply_sender.last_name as reply_to_sender_name`
+const messageColumns = `m.id, m.chat_id, m.sender_id, m.type, m.content, m.file_url, m.created_at, m.updated_at, m.reply_to, m.encrypted_content, m.encrypted_keys, m.location, m.duration, m.forwarded_from, m.forwarded_sender_name, m.scheduled_at, m.thread_id, m.synced_to_xmpp, m.xmpp_message_id, reply_msg.content as reply_to_content, reply_sender.first_name || ' ' || reply_sender.last_name as reply_to_sender_name`
 
-const messageColumnsBase = `m.id, m.chat_id, m.sender_id, m.type, m.content, m.file_url, m.created_at, m.updated_at, m.reply_to, m.encrypted_content, m.encrypted_keys, m.latitude, m.longitude, m.location_address, m.duration, m.forwarded_from, m.forwarded_sender_name, m.scheduled_at, m.thread_id, m.synced_to_xmpp, m.xmpp_message_id`
+const messageColumnsBase = `m.id, m.chat_id, m.sender_id, m.type, m.content, m.file_url, m.created_at, m.updated_at, m.reply_to, m.encrypted_content, m.encrypted_keys, m.location, m.duration, m.forwarded_from, m.forwarded_sender_name, m.scheduled_at, m.thread_id, m.synced_to_xmpp, m.xmpp_message_id`
 
 func (s *PostgresStorage) GetMessagesByChat(ctx context.Context, chatID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	return s.GetMessagesByChatForUser(ctx, chatID, uuid.Nil, limit, offset)
@@ -1162,7 +1352,7 @@ func (s *PostgresStorage) GetMessagesByChatForUser(ctx context.Context, chatID, 
 	return messages, rows.Err()
 }
 
-func (s *PostgresStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
+func (s *PostgresStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
 	// Validate and sanitize query
 	if len(query) > 200 {
 		query = query[:200]
@@ -1171,15 +1361,36 @@ func (s *PostgresStorage) SearchMessages(ctx context.Context, chatID uuid.UUID, 
 	query = strings.ReplaceAll(query, "%", "\\%")
 	query = strings.ReplaceAll(query, "_", "\\_")
 
-	sqlQuery := `
-		SELECT ` + messageColumns + `
-		FROM messages
-		WHERE chat_id = $1 AND content ILIKE $2
-		ORDER BY created_at DESC
-		LIMIT $3 OFFSET $4
-	`
-	searchPattern := "%" + query + "%"
-	rows, err := s.db.QueryContext(ctx, sqlQuery, chatID, searchPattern, limit, offset)
+	args := []interface{}{chatID}
+	conditions := []string{"m.chat_id = $1"}
+
+	if query != "" {
+		args = append(args, "%"+query+"%")
+		conditions = append(conditions, fmt.Sprintf("m.content ILIKE $%d", len(args)))
+	}
+	if senderID != nil {
+		args = append(args, *senderID)
+		conditions = append(conditions, fmt.Sprintf("m.sender_id = $%d", len(args)))
+	}
+	if dateFrom != nil {
+		args = append(args, *dateFrom)
+		conditions = append(conditions, fmt.Sprintf("m.created_at >= $%d", len(args)))
+	}
+	if dateTo != nil {
+		args = append(args, *dateTo)
+		conditions = append(conditions, fmt.Sprintf("m.created_at <= $%d", len(args)))
+	}
+
+	args = append(args, limit, offset)
+	sqlQuery := `SELECT ` + messageColumns + `
+		FROM messages m
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
+		WHERE ` + strings.Join(conditions, " AND ") + `
+		ORDER BY m.created_at DESC
+		LIMIT $` + fmt.Sprintf("%d", len(args)-1) + ` OFFSET $` + fmt.Sprintf("%d", len(args))
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1242,7 +1453,7 @@ func (s *PostgresStorage) MarkMessagesAsRead(ctx context.Context, messageIDs []u
 		SELECT unnest($1::uuid[]), $2, NOW()
 		ON CONFLICT (message_id, user_id) DO NOTHING
 	`
-	_, err := s.db.ExecContext(ctx, query, messageIDs, userID)
+	_, err := s.db.ExecContext(ctx, query, pq.Array(messageIDs), userID)
 	return err
 }
 
@@ -1487,35 +1698,37 @@ func (s *PostgresStorage) DeleteDeviceToken(ctx context.Context, token string) e
 func (s *PostgresStorage) GetNotificationSettings(ctx context.Context, userID uuid.UUID) (*models.NotificationSettings, error) {
 	settings := &models.NotificationSettings{UserID: userID}
 	query := `
-		SELECT push_enabled, email_enabled, email, 
-		       CAST(quiet_hours_start AS TEXT), 
-		       CAST(quiet_hours_end AS TEXT), 
-		       quiet_hours_enabled, protocol_preference, updated_at
+		SELECT push_enabled, email_enabled, email,
+		       quiet_hours_start, quiet_hours_end,
+		       quiet_hours_enabled, protocol_preference, hybrid_mode_enabled, updated_at
 		FROM notification_settings
 		WHERE user_id = $1
 	`
-	var quietStartStr, quietEndStr string
+	var quietStartStr, quietEndStr sql.NullString
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
 		&settings.PushEnabled, &settings.EmailEnabled, &settings.Email,
-		&quietStartStr, &quietEndStr, &settings.QuietHoursEnabled, &settings.ProtocolPreference, &settings.UpdatedAt,
+		&quietStartStr, &quietEndStr, &settings.QuietHoursEnabled, &settings.ProtocolPreference, &settings.HybridModeEnabled, &settings.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			// Return default settings
 			return &models.NotificationSettings{
-				UserID:       userID,
-				PushEnabled:  true,
-				EmailEnabled: true,
+				UserID:             userID,
+				PushEnabled:        true,
+				EmailEnabled:       true,
+				HybridModeEnabled:  false,
+				ProtocolPreference: "websocket",
+				UpdatedAt:          time.Now(),
 			}, nil
 		}
 		return nil, err
 	}
 	// Set quiet hours strings if they exist
-	if quietStartStr != "" {
-		settings.QuietHoursStart = &quietStartStr
+	if quietStartStr.Valid {
+		settings.QuietHoursStart = &quietStartStr.String
 	}
-	if quietEndStr != "" {
-		settings.QuietHoursEnd = &quietEndStr
+	if quietEndStr.Valid {
+		settings.QuietHoursEnd = &quietEndStr.String
 	}
 	return settings, nil
 }
@@ -1548,8 +1761,8 @@ func (s *PostgresStorage) UpdateNotificationSettings(ctx context.Context, settin
 	fmt.Printf("[PostgresStorage] UpdateNotificationSettings: protocol_preference=%q, settings.ProtocolPreference=%q, quiet_hours_enabled=%v\n", protocolPreference, settings.ProtocolPreference, settings.QuietHoursEnabled)
 
 	query := `
-		INSERT INTO notification_settings (user_id, push_enabled, email_enabled, email, quiet_hours_start, quiet_hours_end, quiet_hours_enabled, protocol_preference, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+		INSERT INTO notification_settings (user_id, push_enabled, email_enabled, email, quiet_hours_start, quiet_hours_end, quiet_hours_enabled, protocol_preference, hybrid_mode_enabled, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (user_id) DO UPDATE SET
 			push_enabled = EXCLUDED.push_enabled,
 			email_enabled = EXCLUDED.email_enabled,
@@ -1558,13 +1771,14 @@ func (s *PostgresStorage) UpdateNotificationSettings(ctx context.Context, settin
 			quiet_hours_end = EXCLUDED.quiet_hours_end,
 			quiet_hours_enabled = EXCLUDED.quiet_hours_enabled,
 			protocol_preference = CASE WHEN EXCLUDED.protocol_preference IS NULL OR EXCLUDED.protocol_preference = '' THEN 'websocket' ELSE EXCLUDED.protocol_preference END,
+			hybrid_mode_enabled = EXCLUDED.hybrid_mode_enabled,
 			updated_at = EXCLUDED.updated_at
 		RETURNING updated_at
 	`
 	return s.db.QueryRowContext(ctx, query,
 		settings.UserID, settings.PushEnabled, settings.EmailEnabled, settings.Email,
 		quietStart, quietEnd, settings.QuietHoursEnabled,
-		protocolPreference,
+		protocolPreference, settings.HybridModeEnabled,
 	).Scan(&settings.UpdatedAt)
 }
 
@@ -1691,6 +1905,8 @@ func (s *PostgresStorage) RemoveBookmark(ctx context.Context, userID, messageID 
 func (s *PostgresStorage) GetBookmarks(ctx context.Context, userID uuid.UUID) ([]*models.Message, error) {
 	query := `SELECT ` + messageColumns + ` FROM messages m
 		JOIN bookmarks b ON b.message_id = m.id
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
 		WHERE b.user_id = $1
 		ORDER BY b.created_at DESC`
 	rows, err := s.db.QueryContext(ctx, query, userID)
@@ -1754,20 +1970,38 @@ func (s *PostgresStorage) AddMention(ctx context.Context, messageID, mentionedUs
 	return err
 }
 
-func (s *PostgresStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, limit, offset int) ([]*models.Message, error) {
-	searchQuery := `
-		SELECT m.` + messageColumns + `
+func (s *PostgresStorage) SearchAllMessages(ctx context.Context, userID uuid.UUID, query string, senderID *uuid.UUID, dateFrom, dateTo *time.Time, limit, offset int) ([]*models.Message, error) {
+	args := []interface{}{userID}
+	conditions := []string{"cm.user_id = $1", "cm.archived = false", "cm.deleted_at IS NULL"}
+
+	if query != "" {
+		args = append(args, query)
+		conditions = append(conditions, fmt.Sprintf("to_tsvector('russian', m.content) @@ plainto_tsquery('russian', $%d)", len(args)))
+	}
+	if senderID != nil {
+		args = append(args, *senderID)
+		conditions = append(conditions, fmt.Sprintf("m.sender_id = $%d", len(args)))
+	}
+	if dateFrom != nil {
+		args = append(args, *dateFrom)
+		conditions = append(conditions, fmt.Sprintf("m.created_at >= $%d", len(args)))
+	}
+	if dateTo != nil {
+		args = append(args, *dateTo)
+		conditions = append(conditions, fmt.Sprintf("m.created_at <= $%d", len(args)))
+	}
+
+	args = append(args, limit, offset)
+	searchQuery := `SELECT ` + messageColumns + `
 		FROM messages m
 		JOIN chat_members cm ON m.chat_id = cm.chat_id
-		WHERE cm.user_id = $1 
-			AND cm.archived = false 
-			AND cm.deleted_at IS NULL
-			AND to_tsvector('russian', m.content) @@ plainto_tsquery('russian', $2)
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
+		WHERE ` + strings.Join(conditions, " AND ") + `
 		ORDER BY m.created_at DESC
-		LIMIT $3 OFFSET $4
-	`
+		LIMIT $` + fmt.Sprintf("%d", len(args)-1) + ` OFFSET $` + fmt.Sprintf("%d", len(args))
 
-	rows, err := s.db.QueryContext(ctx, searchQuery, userID, query, limit, offset)
+	rows, err := s.db.QueryContext(ctx, searchQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1867,6 +2101,13 @@ func (s *PostgresStorage) UpdateUserLastOnline(ctx context.Context, userID uuid.
 
 // AuditStorage implementation
 func (s *PostgresStorage) CreateAuditLog(ctx context.Context, log *models.AuditLog) error {
+	// Use defaults for ID and CreatedAt if not set
+	if log.ID == uuid.Nil {
+		log.ID = uuid.New()
+	}
+	if log.CreatedAt.IsZero() {
+		log.CreatedAt = time.Now()
+	}
 	query := `
 		INSERT INTO audit_logs (id, user_id, action, resource, resource_id, details, ip_address, user_agent, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1924,6 +2165,26 @@ func (s *PostgresStorage) GetAllAuditLogs(ctx context.Context, limit, offset int
 	return logs, rows.Err()
 }
 
+func (s *PostgresStorage) DeleteAuditLogs(ctx context.Context, beforeDate *time.Time) (int64, error) {
+	var query string
+	var args []interface{}
+
+	if beforeDate == nil {
+		// Delete all logs
+		query = `DELETE FROM audit_logs`
+	} else {
+		// Delete logs before specified date
+		query = `DELETE FROM audit_logs WHERE created_at < $1`
+		args = append(args, *beforeDate)
+	}
+
+	result, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *PostgresStorage) CreateWebPushSubscription(ctx context.Context, sub *models.WebPushSubscription) error {
 	query := `
 		INSERT INTO web_push_subscriptions (id, user_id, endpoint, key, auth, created_at)
@@ -1969,10 +2230,12 @@ func (s *PostgresStorage) GetUnsyncedMessages(ctx context.Context, limit int) ([
 	// Only sync messages created in the last 30 days
 	query := `
 		SELECT ` + messageColumns + `
-		FROM messages
-		WHERE (synced_to_xmpp = false OR synced_to_xmpp IS NULL)
-		AND created_at > NOW() - INTERVAL '30 days'
-		ORDER BY created_at ASC
+		FROM messages m
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
+		WHERE (m.synced_to_xmpp = false OR m.synced_to_xmpp IS NULL)
+		AND m.created_at > NOW() - INTERVAL '30 days'
+		ORDER BY m.created_at ASC
 		LIMIT $1
 	`
 	rows, err := s.db.QueryContext(ctx, query, limit)
@@ -2004,7 +2267,7 @@ func (s *PostgresStorage) MarkMessageAsSyncedToXMPP(ctx context.Context, message
 
 func (s *PostgresStorage) GetMessageByXMPPID(ctx context.Context, xmppMessageID string) (*models.Message, error) {
 	msg := &models.Message{}
-	query := `SELECT ` + messageColumns + ` FROM messages m WHERE xmpp_message_id = $1`
+	query := `SELECT ` + messageColumns + ` FROM messages m LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id WHERE m.xmpp_message_id = $1`
 	err := scanMessageWithEncryption(
 		s.db.QueryRowContext(ctx, query, xmppMessageID),
 		msg,
@@ -2022,8 +2285,10 @@ func (s *PostgresStorage) GetScheduledMessages(ctx context.Context) ([]*models.M
 	query := `
 		SELECT ` + messageColumns + `
 		FROM messages m
-		WHERE scheduled_at IS NOT NULL AND scheduled_at <= NOW()
-		ORDER BY scheduled_at ASC
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
+		WHERE m.scheduled_at IS NOT NULL AND m.scheduled_at <= NOW()
+		ORDER BY m.scheduled_at ASC
 	`
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -2045,9 +2310,11 @@ func (s *PostgresStorage) GetScheduledMessages(ctx context.Context) ([]*models.M
 func (s *PostgresStorage) GetThreadMessages(ctx context.Context, threadID uuid.UUID, limit, offset int) ([]*models.Message, error) {
 	query := `
 		SELECT ` + messageColumns + `
-		FROM messages
-		WHERE thread_id = $1
-		ORDER BY created_at ASC
+		FROM messages m
+		LEFT JOIN messages reply_msg ON m.reply_to = reply_msg.id
+		LEFT JOIN users reply_sender ON reply_msg.sender_id = reply_sender.id
+		WHERE m.thread_id = $1
+		ORDER BY m.created_at ASC
 		LIMIT $2 OFFSET $3
 	`
 	rows, err := s.db.QueryContext(ctx, query, threadID, limit, offset)
@@ -2228,4 +2495,291 @@ func (s *PostgresStorage) CleanupOldLoginAttempts(ctx context.Context, olderThan
 	`
 	_, err := s.db.ExecContext(ctx, query, olderThan)
 	return err
+}
+
+// CreateTwoFactorSettings creates 2FA settings for a user
+func (s *PostgresStorage) CreateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	query := `
+		INSERT INTO two_factor_settings (user_id, secret, backup_codes, enabled, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	backupCodesJSON, _ := json.Marshal(settings.BackupCodes)
+	_, err := s.db.ExecContext(ctx, query, settings.UserID, settings.Secret, backupCodesJSON, settings.Enabled, settings.CreatedAt, settings.UpdatedAt)
+	return err
+}
+
+// GetTwoFactorSettings retrieves 2FA settings for a user
+func (s *PostgresStorage) GetTwoFactorSettings(ctx context.Context, userID uuid.UUID) (*models.TwoFactorSettings, error) {
+	query := `
+		SELECT user_id, secret, backup_codes, enabled, created_at, updated_at
+		FROM two_factor_settings
+		WHERE user_id = $1
+	`
+	var settings models.TwoFactorSettings
+	var backupCodesJSON []byte
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(
+		&settings.UserID, &settings.Secret, &backupCodesJSON,
+		&settings.Enabled, &settings.CreatedAt, &settings.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if len(backupCodesJSON) > 0 {
+		json.Unmarshal(backupCodesJSON, &settings.BackupCodes)
+	}
+	return &settings, nil
+}
+
+// UpdateTwoFactorSettings updates 2FA settings for a user
+func (s *PostgresStorage) UpdateTwoFactorSettings(ctx context.Context, settings *models.TwoFactorSettings) error {
+	query := `
+		UPDATE two_factor_settings
+		SET secret = $1, backup_codes = $2, enabled = $3, updated_at = $4
+		WHERE user_id = $5
+	`
+	backupCodesJSON, _ := json.Marshal(settings.BackupCodes)
+	_, err := s.db.ExecContext(ctx, query, settings.Secret, backupCodesJSON, settings.Enabled, settings.UpdatedAt, settings.UserID)
+	return err
+}
+
+// DeleteTwoFactorSettings deletes 2FA settings for a user
+func (s *PostgresStorage) DeleteTwoFactorSettings(ctx context.Context, userID uuid.UUID) error {
+	query := `DELETE FROM two_factor_settings WHERE user_id = $1`
+	_, err := s.db.ExecContext(ctx, query, userID)
+	return err
+}
+
+// VerifyUserPassword verifies a user's password
+func (s *PostgresStorage) VerifyUserPassword(ctx context.Context, userID uuid.UUID, password string) error {
+	query := `
+		SELECT password_hash
+		FROM user_credentials
+		WHERE user_id = $1
+	`
+	var passwordHash string
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&passwordHash)
+	if err != nil {
+		return err
+	}
+	return bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password))
+}
+
+// UpdateUserRole updates a user's role
+func (s *PostgresStorage) UpdateUserRole(ctx context.Context, userID uuid.UUID, role string) error {
+	query := `UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2`
+	_, err := s.db.ExecContext(ctx, query, role, userID)
+	return err
+}
+
+// DeleteAllUserSessions deletes all sessions for a user
+func (s *PostgresStorage) DeleteAllUserSessions(ctx context.Context, userID uuid.UUID) error {
+	query := `DELETE FROM sessions WHERE user_id = $1`
+	_, err := s.db.ExecContext(ctx, query, userID)
+	return err
+}
+
+// GetAdminStats returns system statistics for admin dashboard
+func (s *PostgresStorage) GetAdminStats(ctx context.Context) (*models.AdminStats, error) {
+	stats := &models.AdminStats{}
+
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&stats.TotalUsers)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE status = 'active'`).Scan(&stats.ActiveUsers)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE status = 'blocked'`).Scan(&stats.BlockedUsers)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin'`).Scan(&stats.AdminCount)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'moderator'`).Scan(&stats.ModeratorCount)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chats`).Scan(&stats.TotalChats)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages`).Scan(&stats.TotalMessages)
+	if err != nil {
+		return nil, err
+	}
+
+	// Users with last_online within last 5 minutes
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE last_online > NOW() - INTERVAL '5 minutes'`).Scan(&stats.OnlineUsers)
+	if err != nil {
+		// last_online might not exist, default to 0
+		stats.OnlineUsers = 0
+	}
+
+	return stats, nil
+}
+
+// RotateEncryptionKey rotates a user's encryption key by archiving the old key and creating a new one
+func (s *PostgresStorage) RotateEncryptionKey(ctx context.Context, userID uuid.UUID, newPublicKey, newPrivateKey, reason string) (int, error) {
+	query := `SELECT new_version, archived_id FROM rotate_encryption_key($1, $2, $3, $4)`
+	var newVersion int
+	var archivedID uuid.UUID
+	err := s.db.QueryRowContext(ctx, query, userID, newPublicKey, newPrivateKey, reason).Scan(&newVersion, &archivedID)
+	if err != nil {
+		return 0, fmt.Errorf("rotate encryption key: %w", err)
+	}
+	return newVersion, nil
+}
+
+// GetEncryptionKeyByVersion retrieves an encryption key by version (current or archived)
+func (s *PostgresStorage) GetEncryptionKeyByVersion(ctx context.Context, userID uuid.UUID, version int) (*models.EncryptionKey, error) {
+	query := `SELECT public_key, private_key, key_version FROM get_encryption_key_by_version($1, $2)`
+	var key models.EncryptionKey
+	var privateKey sql.NullString
+
+	err := s.db.QueryRowContext(ctx, query, userID, version).Scan(&key.PublicKey, &privateKey, &key.KeyVersion)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get encryption key by version: %w", err)
+	}
+
+	key.UserID = userID
+	if privateKey.Valid {
+		key.PrivateKey = privateKey.String
+	}
+
+	return &key, nil
+}
+
+// SaveUserConsent saves or updates user consent
+func (s *PostgresStorage) SaveUserConsent(ctx context.Context, consent *models.UserConsent) error {
+	query := `
+		INSERT INTO user_consents (user_id, consent_type, consent_given, consent_text, consent_version, ip_address, user_agent, consented_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (user_id, consent_type) 
+		DO UPDATE SET 
+			consent_given = $3,
+			consent_text = $4,
+			consent_version = $5,
+			ip_address = $6,
+			user_agent = $7,
+			consented_at = $8,
+			revoked_at = $9,
+			updated_at = NOW()
+	`
+	_, err := s.db.ExecContext(ctx, query,
+		consent.UserID, consent.ConsentType, consent.ConsentGiven,
+		consent.ConsentText, consent.ConsentVersion, consent.IPAddress,
+		consent.UserAgent, consent.ConsentedAt, consent.RevokedAt,
+	)
+	return err
+}
+
+// GetUserConsents retrieves all consents for a user
+func (s *PostgresStorage) GetUserConsents(ctx context.Context, userID uuid.UUID) ([]*models.UserConsent, error) {
+	query := `
+		SELECT id, user_id, consent_type, consent_given, consent_text, consent_version, 
+		       ip_address, user_agent, consented_at, revoked_at, created_at, updated_at
+		FROM user_consents
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var consents []*models.UserConsent
+	for rows.Next() {
+		var c models.UserConsent
+		err := rows.Scan(
+			&c.ID, &c.UserID, &c.ConsentType, &c.ConsentGiven,
+			&c.ConsentText, &c.ConsentVersion, &c.IPAddress, &c.UserAgent,
+			&c.ConsentedAt, &c.RevokedAt, &c.CreatedAt, &c.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		consents = append(consents, &c)
+	}
+	return consents, rows.Err()
+}
+
+// HasValidConsent checks if user has valid consent for a type
+func (s *PostgresStorage) HasValidConsent(ctx context.Context, userID uuid.UUID, consentType string) (bool, error) {
+	query := `SELECT has_valid_consent($1, $2)`
+	var hasConsent bool
+	err := s.db.QueryRowContext(ctx, query, userID, consentType).Scan(&hasConsent)
+	return hasConsent, err
+}
+
+// CreateDataExportRequest creates a new data export/deletion request
+func (s *PostgresStorage) CreateDataExportRequest(ctx context.Context, request *models.DataExportRequest) error {
+	query := `
+		INSERT INTO data_export_requests (user_id, request_type, status, requested_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`
+	return s.db.QueryRowContext(ctx, query,
+		request.UserID, request.RequestType, request.Status, request.RequestedAt,
+	).Scan(&request.ID)
+}
+
+// GetDataExportRequests retrieves all export requests for a user
+func (s *PostgresStorage) GetDataExportRequests(ctx context.Context, userID uuid.UUID) ([]*models.DataExportRequest, error) {
+	query := `
+		SELECT id, user_id, request_type, status, requested_at, completed_at, 
+		       export_url, expires_at, error_message, created_at, updated_at
+		FROM data_export_requests
+		WHERE user_id = $1
+		ORDER BY requested_at DESC
+	`
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var requests []*models.DataExportRequest
+	for rows.Next() {
+		var r models.DataExportRequest
+		err := rows.Scan(
+			&r.ID, &r.UserID, &r.RequestType, &r.Status, &r.RequestedAt,
+			&r.CompletedAt, &r.ExportURL, &r.ExpiresAt, &r.ErrorMsg,
+			&r.CreatedAt, &r.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, &r)
+	}
+	return requests, rows.Err()
+}
+
+// AnonymizeUserData anonymizes user data (GDPR Right to Erasure)
+func (s *PostgresStorage) AnonymizeUserData(ctx context.Context, userID uuid.UUID) (map[string]interface{}, error) {
+	query := `SELECT anonymize_user_data($1)`
+	var result []byte
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&result)
+	if err != nil {
+		return nil, fmt.Errorf("anonymize user data: %w", err)
+	}
+
+	var recordsAffected map[string]interface{}
+	if err := json.Unmarshal(result, &recordsAffected); err != nil {
+		return nil, fmt.Errorf("parse anonymization result: %w", err)
+	}
+
+	return recordsAffected, nil
 }

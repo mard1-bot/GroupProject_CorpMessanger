@@ -67,6 +67,7 @@ func validatePassword(password string) error {
 
 type RegisterRequest struct {
 	Email      string `json:"email"`
+	Username   string `json:"username,omitempty"`
 	Password   string `json:"password"`
 	FirstName  string `json:"first_name"`
 	LastName   string `json:"last_name"`
@@ -85,46 +86,69 @@ type AuthResponse struct {
 }
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-	// Limit request body to 64KB to prevent DoS
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	// Validate JSON body with size limit
 	var req RegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+	if err := ValidateJSONBody(r, &req, 64*1024); err != nil {
+		if validationErr, ok := err.(*ValidationError); ok {
+			WriteError(w, ErrInvalidInput, validationErr.Message)
+		} else {
+			WriteError(w, ErrInvalidInput, "Invalid request body")
+		}
 		return
 	}
+	defer r.Body.Close()
 
-	if req.Email == "" || req.Password == "" || req.FirstName == "" || req.LastName == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "Email, password, first_name and last_name are required")
+	// Validate required fields
+	if req.Email == "" {
+		WriteErrorCode(w, http.StatusBadRequest, "missing_email", "Email is required")
 		return
 	}
-
-	if !isValidEmail(req.Email) {
-		WriteError(w, http.StatusBadRequest, "invalid_email", "Invalid email format")
+	if !ValidateEmail(req.Email) {
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_email", "Invalid email format")
 		return
 	}
-
-	// Password strength validation
-	if err := validatePassword(req.Password); err != nil {
-		WriteError(w, http.StatusBadRequest, "password_too_weak", err.Error())
+	if req.Password == "" {
+		WriteErrorCode(w, http.StatusBadRequest, "missing_password", "Password is required")
+		return
+	}
+	if err := ValidatePassword(req.Password); err != nil {
+		if validationErr, ok := err.(*ValidationError); ok {
+			WriteError(w, ErrInvalidInput, validationErr.Message)
+		} else {
+			WriteError(w, ErrInvalidInput, "Password does not meet requirements")
+		}
 		return
 	}
 
 	existingUser, _, err := h.storage.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		h.logger.Error("failed to check existing user", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to check user existence")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check user existence")
 		return
 	}
 	if existingUser != nil {
-		WriteError(w, http.StatusConflict, "email_exists", "User with this email already exists")
+		WriteErrorCode(w, http.StatusConflict, "email_exists", "User with this email already exists")
 		return
+	}
+
+	// Validate and check username uniqueness
+	if req.Username != "" {
+		existingUsername, err := h.storage.GetUserByUsername(r.Context(), req.Username)
+		if err != nil {
+			h.logger.Error("failed to check existing username", "error", err)
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check username existence")
+			return
+		}
+		if existingUsername != nil {
+			WriteErrorCode(w, http.StatusConflict, "username_exists", "Username is already taken")
+			return
+		}
 	}
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		h.logger.Error("failed to hash password", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Internal server error")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Internal server error")
 		return
 	}
 
@@ -140,10 +164,14 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	if req.MiddleName != "" {
 		user.MiddleName = &req.MiddleName
 	}
+	// Set username if provided
+	if req.Username != "" {
+		user.Username = &req.Username
+	}
 
 	if err := h.storage.CreateUser(r.Context(), user, string(hashedPassword)); err != nil {
 		h.logger.Error("failed to create user", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to create user")
 		return
 	}
 
@@ -156,7 +184,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {
 		h.logger.Error("failed to generate token", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to generate token")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to generate token")
 		return
 	}
 
@@ -170,7 +198,7 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.storage.CreateSession(r.Context(), session); err != nil {
 		h.logger.Error("failed to create session", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to create session")
 		return
 	}
 
@@ -181,6 +209,16 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to cleanup old sessions", "error", err)
 	}
 
+	// Audit log
+	h.storage.CreateAuditLog(r.Context(), &models.AuditLog{
+		UserID:     user.ID,
+		Action:     "user_registered",
+		Resource:   "user",
+		ResourceID: user.ID.String(),
+		IPAddress:  getClientIP(r),
+		UserAgent:  r.Header.Get("User-Agent"),
+	})
+
 	WriteJSON(w, http.StatusCreated, AuthResponse{Token: token, User: user})
 }
 
@@ -190,24 +228,24 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 
 	if req.Email == "" || req.Password == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "Email and password are required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_fields", "Email and password are required")
 		return
 	}
 
 	user, passwordHash, err := h.storage.GetUserByEmail(r.Context(), req.Email)
 	if err != nil {
 		h.logger.Error("login: failed to get user by email", "email", req.Email, "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to authenticate user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to authenticate user")
 		return
 	}
 	if user == nil {
 		h.logger.Warn("login: user not found", "email", req.Email)
-		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
+		WriteErrorCode(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}
 
@@ -228,11 +266,11 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		}
 		if locked {
 			h.logger.Warn("login: account locked due to too many failed attempts", "email", req.Email)
-			WriteError(w, http.StatusTooManyRequests, "account_locked", "Account temporarily locked due to too many failed login attempts. Please try again later.")
+			WriteErrorCode(w, http.StatusTooManyRequests, "account_locked", "Account temporarily locked due to too many failed login attempts. Please try again later.")
 			return
 		}
 
-		WriteError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
+		WriteErrorCode(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password")
 		return
 	}
 
@@ -246,7 +284,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	token, err := h.jwt.GenerateToken(user.ID, user.Email, user.Role, h.sessionDuration)
 	if err != nil {
 		h.logger.Error("failed to generate token", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to generate token")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to generate token")
 		return
 	}
 
@@ -260,7 +298,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.storage.CreateSession(r.Context(), session); err != nil {
 		h.logger.Error("failed to create session", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create session")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to create session")
 		return
 	}
 
@@ -271,13 +309,23 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("failed to cleanup old sessions", "error", err)
 	}
 
+	// Audit log
+	h.storage.CreateAuditLog(r.Context(), &models.AuditLog{
+		UserID:     user.ID,
+		Action:     "user_logged_in",
+		Resource:   "auth",
+		ResourceID: session.ID.String(),
+		IPAddress:  getClientIP(r),
+		UserAgent:  r.Header.Get("User-Agent"),
+	})
+
 	WriteJSON(w, http.StatusOK, AuthResponse{Token: token, User: user})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -289,15 +337,15 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 		session, err := h.storage.GetSessionByToken(r.Context(), token)
 		if err != nil {
 			h.logger.Error("failed to get session", "error", err)
-			WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate session")
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate session")
 			return
 		}
 		if session == nil {
-			WriteError(w, http.StatusUnauthorized, "session_not_found", "Session not found")
+			WriteErrorCode(w, http.StatusUnauthorized, "session_not_found", "Session not found")
 			return
 		}
 		if session.UserID != claims.UserID {
-			WriteError(w, http.StatusForbidden, "forbidden", "Cannot logout another user's session")
+			WriteErrorCode(w, http.StatusForbidden, "forbidden", "Cannot logout another user's session")
 			return
 		}
 
@@ -312,13 +360,13 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getCurrentUser(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
 	if err != nil || user == nil {
-		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
+		WriteErrorCode(w, http.StatusNotFound, "user_not_found", "User not found")
 		return
 	}
 
@@ -328,7 +376,7 @@ func (h *Handler) getCurrentUser(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -338,19 +386,19 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	if req.OldPassword == "" || req.NewPassword == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "Old password and new password are required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_fields", "Old password and new password are required")
 		return
 	}
 
 	// Validate new password strength
 	if err := validatePassword(req.NewPassword); err != nil {
-		WriteError(w, http.StatusBadRequest, "password_too_weak", err.Error())
+		WriteErrorCode(w, http.StatusBadRequest, "password_too_weak", err.Error())
 		return
 	}
 
@@ -358,13 +406,13 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	// This handles the case where user changes email after JWT was issued
 	user, passwordHash, err := h.storage.GetUserByIDWithPassword(r.Context(), claims.UserID)
 	if err != nil || user == nil {
-		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
+		WriteErrorCode(w, http.StatusNotFound, "user_not_found", "User not found")
 		return
 	}
 
 	// Verify old password
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.OldPassword)); err != nil {
-		WriteError(w, http.StatusUnauthorized, "invalid_password", "Invalid old password")
+		WriteErrorCode(w, http.StatusUnauthorized, "invalid_password", "Invalid old password")
 		return
 	}
 
@@ -372,14 +420,14 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
 		h.logger.Error("failed to hash password", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Internal server error")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Internal server error")
 		return
 	}
 
 	// Update password in database
 	if err := h.storage.UpdateUserPassword(r.Context(), user.ID, string(hashedPassword)); err != nil {
 		h.logger.Error("failed to update password", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update password")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update password")
 		return
 	}
 
@@ -395,7 +443,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -406,26 +454,26 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSON(r.Body, &req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	if req.Password == "" {
-		WriteError(w, http.StatusBadRequest, "missing_password", "Password is required for deletion")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_password", "Password is required for deletion")
 		return
 	}
 
 	// Get current user with password hash using UserID (consistent with changePassword)
 	user, passwordHash, err := h.storage.GetUserByIDWithPassword(r.Context(), claims.UserID)
 	if err != nil || user == nil {
-		WriteError(w, http.StatusNotFound, "user_not_found", "User not found")
+		WriteErrorCode(w, http.StatusNotFound, "user_not_found", "User not found")
 		return
 	}
 
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		WriteError(w, http.StatusUnauthorized, "invalid_password", "Invalid password")
+		WriteErrorCode(w, http.StatusUnauthorized, "invalid_password", "Invalid password")
 		return
 	}
 
@@ -433,7 +481,7 @@ func (h *Handler) deleteUser(w http.ResponseWriter, r *http.Request) {
 	deleteErr := h.storage.DeleteUser(r.Context(), user.ID)
 	if deleteErr != nil {
 		h.logger.Error("failed to delete user", "error", deleteErr)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete user")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to delete user")
 		return
 	}
 
@@ -451,14 +499,14 @@ func AuthMiddleware(jwtService *auth.JWTService, sessionStorage storage.SessionS
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authHeader, "Bearer ") || len(authHeader) <= 7 {
-				WriteError(w, http.StatusUnauthorized, "unauthorized", "Missing or invalid authorization header")
+				WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Missing or invalid authorization header")
 				return
 			}
 
 			token := authHeader[7:]
 			claims, err := jwtService.ParseToken(token)
 			if err != nil {
-				WriteError(w, http.StatusUnauthorized, "invalid_token", "Invalid or expired token")
+				WriteErrorCode(w, http.StatusUnauthorized, "invalid_token", "Invalid or expired token")
 				return
 			}
 
@@ -466,11 +514,11 @@ func AuthMiddleware(jwtService *auth.JWTService, sessionStorage storage.SessionS
 			if sessionStorage != nil {
 				session, err := sessionStorage.GetSessionByToken(r.Context(), token)
 				if err != nil {
-					WriteError(w, http.StatusInternalServerError, "internal", "Failed to validate session")
+					WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate session")
 					return
 				}
 				if session == nil {
-					WriteError(w, http.StatusUnauthorized, "session_expired", "Session has been revoked or expired")
+					WriteErrorCode(w, http.StatusUnauthorized, "session_expired", "Session has been revoked or expired")
 					return
 				}
 			}
@@ -485,11 +533,11 @@ func AdminOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		claims, ok := auth.ClaimsFromContext(r.Context())
 		if !ok {
-			WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+			WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 			return
 		}
 		if claims.Role != models.UserRoleAdmin {
-			WriteError(w, http.StatusForbidden, "forbidden", "Admin access required")
+			WriteErrorCode(w, http.StatusForbidden, "forbidden", "Admin access required")
 			return
 		}
 		next.ServeHTTP(w, r)

@@ -51,7 +51,11 @@ export default function ProfileScreen() {
               </ThemedText>
             </View>
             <ThemedText style={styles.name}>{currentUser?.first_name} {currentUser?.last_name}</ThemedText>
-            <ThemedText style={styles.username}>{currentUser?.email}</ThemedText>
+            {currentUser?.username ? (
+              <ThemedText style={styles.username}>@{currentUser.username}</ThemedText>
+            ) : (
+              <ThemedText style={styles.username}>{currentUser?.email}</ThemedText>
+            )}
           </View>
           <View style={styles.section}>
             <ThemedText type="subtitle" style={styles.sectionTitle}>
@@ -100,6 +104,17 @@ export default function ProfileScreen() {
             <ThemedText style={[styles.menuItemText, { color: textColor }]}>Настройки сообщений</ThemedText>
             <MaterialIcons name="chevron-right" size={24} color={textColor + '60'} />
           </TouchableOpacity>
+
+          {currentUser?.role === 'admin' && (
+            <TouchableOpacity
+              style={[styles.menuItem, { backgroundColor: useThemeColor({}, 'surface'), borderColor: useThemeColor({}, 'border') }]}
+              onPress={() => router.push('/admin')}
+              activeOpacity={0.8}>
+              <MaterialIcons name="admin-panel-settings" size={24} color={textColor} />
+              <ThemedText style={[styles.menuItemText, { color: textColor }]}>Админ-панель</ThemedText>
+              <MaterialIcons name="chevron-right" size={24} color={textColor + '60'} />
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             style={[styles.logoutButton, { borderColor: tintColor }]}

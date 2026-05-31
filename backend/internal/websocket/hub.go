@@ -5,6 +5,7 @@ import (
 	"corp-messenger/backend/internal/livekit"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/storage"
+	"encoding/json"
 	"log"
 	"sync"
 	"time"
@@ -55,6 +56,9 @@ type Hub struct {
 	// LiveKit URL
 	liveKitURL string
 
+	// Rate limiter for WebSocket messages
+	rateLimiter *RateLimiter
+
 	mu         sync.RWMutex
 	shutdownMu sync.Mutex
 	shutdown   bool
@@ -71,6 +75,9 @@ type BroadcastMessage struct {
 
 // NewHub creates a new Hub instance.
 func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string) *Hub {
+	// Rate limit: 60 messages per minute with burst of 10
+	rateLimiter := NewRateLimiter(60, 10)
+
 	return &Hub{
 		broadcast:   make(chan *BroadcastMessage, 256),
 		register:    make(chan *Client),
@@ -83,6 +90,7 @@ func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string
 		storage:     storage,
 		liveKit:     liveKit,
 		liveKitURL:  liveKitURL,
+		rateLimiter: rateLimiter,
 	}
 }
 
@@ -245,9 +253,12 @@ func (h *Hub) BroadcastToChat(msg *BroadcastMessage) {
 	case h.broadcast <- msg:
 		log.Printf("[Hub] Broadcasting %s to chat %s", msg.Type, msg.ChatID)
 	default:
-		// Broadcast channel full, drop message (shouldn't happen with buffer)
-		log.Printf("[Hub] Broadcast channel full, dropping %s to chat %s", msg.Type, msg.ChatID)
 	}
+}
+
+// BroadcastToAll sends a message to all connected clients.
+func (h *Hub) BroadcastToAll(msg *BroadcastMessage) {
+	h.broadcast <- msg
 }
 
 // BroadcastToUser sends a message to all clients of a specific user.
@@ -355,6 +366,118 @@ func (h *Hub) sendToClient(client *Client, msg *BroadcastMessage) {
 // CallManager returns the call manager instance
 func (h *Hub) CallManager() *CallManager {
 	return h.callManager
+}
+
+// HandleLoadChats handles synchronous loading of user's chats
+func (h *Hub) HandleLoadChats(client *Client) {
+	if h.storage == nil {
+		log.Printf("[Hub] Storage not available for load_chats")
+		return
+	}
+
+	ctx := context.Background()
+	chats, err := h.storage.GetUserChats(ctx, client.UserID)
+	if err != nil {
+		log.Printf("[Hub] Failed to load chats for user %s: %v", client.UserID, err)
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    "error",
+			Payload: map[string]interface{}{"error": "Failed to load chats"},
+		})
+		return
+	}
+
+	// Send chats directly to the requesting client
+	h.sendToClient(client, &BroadcastMessage{
+		Type:    "chats_loaded",
+		Payload: map[string]interface{}{"chats": chats},
+	})
+
+	log.Printf("[Hub] Loaded %d chats for user %s", len(chats), client.UserID)
+}
+
+// HandleLoadMessages handles synchronous loading of messages for a specific chat
+func (h *Hub) HandleLoadMessages(client *Client, payload json.RawMessage) {
+	if h.storage == nil {
+		log.Printf("[Hub] Storage not available for load_messages")
+		return
+	}
+
+	var params struct {
+		ChatID string `json:"chat_id"`
+		Limit  int    `json:"limit"`
+		Offset int    `json:"offset"`
+	}
+
+	if err := json.Unmarshal(payload, &params); err != nil {
+		log.Printf("[Hub] Invalid load_messages payload: %v", err)
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    "error",
+			Payload: map[string]interface{}{"error": "Invalid payload"},
+		})
+		return
+	}
+
+	chatID, err := uuid.Parse(params.ChatID)
+	if err != nil {
+		log.Printf("[Hub] Invalid chat ID in load_messages: %v", err)
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    "error",
+			Payload: map[string]interface{}{"error": "Invalid chat ID"},
+		})
+		return
+	}
+
+	// Set defaults
+	if params.Limit <= 0 {
+		params.Limit = 50
+	}
+	if params.Offset < 0 {
+		params.Offset = 0
+	}
+
+	ctx := context.Background()
+	messages, err := h.storage.GetMessagesByChat(ctx, chatID, params.Limit, params.Offset)
+	if err != nil {
+		log.Printf("[Hub] Failed to load messages for chat %s: %v", chatID, err)
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    "error",
+			Payload: map[string]interface{}{"error": "Failed to load messages"},
+		})
+		return
+	}
+
+	// Load reactions for each message and create response structure
+	type MessageWithReactions struct {
+		*models.Message
+		Reactions []*models.Reaction `json:"reactions,omitempty"`
+	}
+
+	messagesWithReactions := make([]*MessageWithReactions, len(messages))
+	for i, msg := range messages {
+		reactions, err := h.storage.GetMessageReactions(ctx, msg.ID)
+		if err != nil {
+			log.Printf("[Hub] Failed to load reactions for message %s: %v", msg.ID, err)
+			reactions = []*models.Reaction{}
+		}
+		messagesWithReactions[i] = &MessageWithReactions{
+			Message:   msg,
+			Reactions: reactions,
+		}
+	}
+
+	// Send messages directly to the requesting client
+	h.sendToClient(client, &BroadcastMessage{
+		Type:   "messages_loaded",
+		ChatID: chatID,
+		Payload: map[string]interface{}{
+			"messages": messagesWithReactions,
+			"chat_id":  chatID,
+			"limit":    params.Limit,
+			"offset":   params.Offset,
+		},
+	})
+
+	log.Printf("[Hub] Loaded %d messages for chat %s (user %s)", len(messagesWithReactions), chatID, client.UserID)
 }
 
 // CreateCallSystemMessage creates a system message for call events

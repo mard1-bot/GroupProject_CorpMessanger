@@ -17,6 +17,8 @@ export type Chat = {
   creator_id: string;
   created_at: string;
   updated_at: string;
+  last_message?: string;
+  last_message_at?: string;
   members?: {
     user_id: string;
     role?: string;
@@ -49,8 +51,11 @@ export type Message = {
   scheduled_at?: string;
   thread_id?: string;
   reply_to?: string;
+  reply_to_content?: string;
+  reply_to_sender_name?: string;
   forwarded_from?: string;
   forwarded_sender_name?: string;
+  status?: 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 };
 
 export type Reaction = {

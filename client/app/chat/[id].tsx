@@ -26,6 +26,7 @@ import * as FileSystem from 'expo-file-system';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
+import { MentionText } from '@/components/mention-text';
 import { useThemeColor } from '@/hooks/use-theme-color';
 import { useAuth } from '@/contexts/auth-context';
 import { CallModal } from '@/components/call-modal';
@@ -99,6 +100,15 @@ export default function ChatScreen() {
   const [callModalVisible, setCallModalVisible] = useState(false);
   const [callType, setCallType] = useState<'audio' | 'video'>('audio');
 
+// Failed messages queue for retry
+  const [failedMessages, setFailedMessages] = useState<Array<{
+    tempId: string;
+    content: string;
+    type: 'text' | 'file';
+    file?: { uri: string; name: string; type: string; file?: File | Blob };
+    replyTo?: string;
+  }>>([]);
+
   // Image preview state
   const [imagePreviewVisible, setImagePreviewVisible] = useState(false);
   const [previewImageUrl, setPreviewImageUrl] = useState('');
@@ -141,26 +151,24 @@ export default function ChatScreen() {
     }
   };
 
-  // Load messages for the chat
+  // Load messages for the chat (using WebSocket for synchronous loading)
   const loadMessages = async () => {
     if (!id || !token) return;
     console.log('[Chat] Loading messages for:', id);
+    
     try {
       const res = await api.getChatMessages(id, 50);
-      console.log('[Chat] Messages loaded:', res.data?.length, 'error:', res.error?.message);
       if (res.data) {
         // Load reactions for each message
         const messagesWithReactions = await Promise.all(
           res.data.map(async (msg) => {
             try {
               const reactionsRes = await api.getMessageReactions(msg.id);
-              console.log('[Chat] Loaded reactions for message', msg.id, ':', reactionsRes.data?.length || 0);
               return {
                 ...msg,
                 reactions: reactionsRes.data || [],
               };
             } catch (error) {
-              console.error('[Chat] Failed to load reactions for message:', msg.id, error);
               return msg;
             }
           })
@@ -627,14 +635,6 @@ export default function ChatScreen() {
     // TODO: Scroll to specific message in the future
   }, [closeSearch]);
 
-  const scrollToMessage = useCallback((messageId: string) => {
-    const index = messages.findIndex(m => m.id === messageId);
-    if (index !== -1 && listRef.current) {
-      // Use scrollToEnd instead of scrollToIndex to avoid the error
-      listRef.current?.scrollToEnd({ animated: true });
-    }
-  }, [messages]);
-
   // Get all pinned messages
   const pinnedMessages = useMemo(() => messages.filter(m => m.pinned), [messages]);
 
@@ -646,13 +646,6 @@ export default function ChatScreen() {
       setCurrentPinnedIndex(pinnedMessages.length - 1);
     }
   }, [pinnedMessages, currentPinnedIndex]);
-
-  // Auto-scroll to current pinned message when index changes
-  useEffect(() => {
-    if (pinnedMessages[currentPinnedIndex]) {
-      scrollToMessage(pinnedMessages[currentPinnedIndex].id);
-    }
-  }, [currentPinnedIndex, pinnedMessages, scrollToMessage]);
 
   const nextPinnedMessage = useCallback(() => {
     if (pinnedMessages.length === 0) return;
@@ -693,8 +686,12 @@ export default function ChatScreen() {
                 <MaterialIcons name="chevron-left" size={16} color={iconColor} style={{ marginRight: 4 }} />
               </TouchableOpacity>
               <TouchableOpacity
-                onPress={() => scrollToMessage(pinnedMessage.id)}
-                style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                onPress={() => {
+                  if (pinnedMessage) {
+                    scrollToMessage(pinnedMessage.id);
+                  }
+                }}
+                style={{ flexDirection: 'row', alignItems: 'center', flexShrink: 1 }}>
                 <MaterialIcons name="push-pin" size={12} color={primaryColor} style={{ marginRight: 4 }} />
                 <ThemedText style={{ fontSize: 12, opacity: 0.7 }} numberOfLines={1}>
                   {pinnedMessage.content || 'Вложение'}
@@ -760,7 +757,7 @@ export default function ChatScreen() {
         </View>
       ),
     });
-  }, [navigation, isGroup, chat, other, iconColor, primaryColor, pinnedMessages, currentPinnedIndex, scrollToMessage, nextPinnedMessage, prevPinnedMessage, onSearchPress]);
+  }, [navigation, isGroup, chat, other, iconColor, primaryColor, pinnedMessages, currentPinnedIndex, nextPinnedMessage, prevPinnedMessage, onSearchPress]);
 
   // Fetch chat info (wait for token)
   useEffect(() => {
@@ -788,6 +785,283 @@ export default function ChatScreen() {
     loadMessages();
   }, [id, token]);
 
+  // WebSocket connection will be added after retryFailedMessages function
+
+  // Get last read message ID
+  const lastReadMessageId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.sender_id === user?.id) {
+        const readByOthers = (msg.read_by || []).filter(id => id !== user?.id);
+        if (readByOthers.length > 0) {
+          return msg.id;
+        }
+      }
+    }
+    return null;
+  }, [messages, user]);
+
+  const listItems = useMemo(() => {
+    const items: ListItem[] = [];
+    let lastDate = '';
+    let hasShownUnreadDivider = false;
+    
+    // Find first unread message from others (not from me)
+    const firstUnreadIndex = messages.findIndex(m => 
+      m.sender_id !== user?.id && !(m.read_by || []).includes(user?.id || '')
+    );
+    
+    messages.forEach((m, index) => {
+      const date = dayjs(m.created_at).format('D MMMM YYYY');
+      if (date !== lastDate) {
+        items.push({ type: 'date', key: `date-${date}`, label: date });
+        lastDate = date;
+      }
+      
+      // Show "New messages" divider BEFORE first unread message from others
+      if (!hasShownUnreadDivider && index === firstUnreadIndex && firstUnreadIndex !== -1) {
+        items.push({ type: 'unread', key: 'unread-divider', label: 'Новые сообщения' });
+        hasShownUnreadDivider = true;
+      }
+      
+      items.push({ type: 'message', key: m.id, message: m });
+    });
+    return items;
+  }, [messages, user]);
+
+  const scrollToMessage = useCallback((messageId: string) => {
+    const listIndex = listItems.findIndex(item => item.type === 'message' && item.message?.id === messageId);
+    if (listIndex !== -1 && listRef.current) {
+      try {
+        listRef.current?.scrollToIndex({ index: listIndex, animated: true, viewPosition: 0.5 });
+      } catch (e) {
+        listRef.current?.scrollToEnd({ animated: true });
+      }
+    }
+  }, [listItems]);
+
+  const scrollToCurrentPinned = useCallback(() => {
+    if (pinnedMessages[currentPinnedIndex]) {
+      scrollToMessage(pinnedMessages[currentPinnedIndex].id);
+    }
+  }, [currentPinnedIndex, pinnedMessages, scrollToMessage]);
+
+  const sendMessage = useCallback(async () => {
+    const trimmed = input.trim();
+    const hasFile = selectedFile !== null;
+
+    // Валидация пустого сообщения
+    if (!trimmed && !hasFile) {
+      Alert.alert('Ошибка', 'Сообщение не может быть пустым');
+      return;
+    }
+
+    // Проверка формата файла
+    if (hasFile && selectedFile) {
+      const allowedTypes = [
+        'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+        'application/pdf', 'text/plain', 'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'video/mp4', 'video/avi', 'video/mov'
+      ];
+      
+      const fileExtension = selectedFile.name.split('.').pop()?.toLowerCase();
+      const allowedExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'mp4', 'avi', 'mov'];
+      
+      if (fileExtension && !allowedExtensions.includes(fileExtension)) {
+        Alert.alert('Ошибка', `Файл формата .${fileExtension} не поддерживается. Поддерживаемые форматы: ${allowedExtensions.join(', ')}`);
+        return;
+      }
+    }
+
+    if (!id || !user) {
+      Alert.alert('Ошибка', 'Не удалось определить чат или пользователя');
+      return;
+    }
+
+    // Проверка соединения
+    if (!wsService.isConnected()) {
+      Alert.alert(
+        'Отсутствует соединение',
+        'Нет подключения к серверу. Сообщение будет отправлено автоматически при восстановлении соединения.',
+        [
+          { text: 'OK', style: 'default' },
+          { text: 'Повторить', onPress: () => sendMessage() }
+        ]
+      );
+      return;
+    }
+
+    // Stop typing indicator
+    wsService.sendTyping(id, false, user.first_name, user.last_name);
+
+    setInput('');
+    const tempId = `temp-${Date.now()}`;
+    const optimistic: Message = {
+      id: tempId,
+      chat_id: id,
+      sender_id: user.id,
+      type: hasFile ? 'file' : 'text',
+      content: trimmed || '[Файл]',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      reply_to: replyingTo?.id,
+      status: 'sending', // Добавляем статус отправки
+    };
+    setMessages(prev => [...prev, optimistic]);
+
+    try {
+      // Send message first
+      const res = await api.sendMessage(id, trimmed || '[Файл]', hasFile ? 'file' : 'text', replyingTo?.id);
+      if (!res.data) {
+        throw new Error('Failed to send message');
+      }
+      
+      const messageId = res.data.id;
+      
+      // Update message status to sent
+      setMessages(prev => prev.map(m => 
+        m.id === tempId ? { ...m, id: res.data!.id, status: 'sent' } : m
+      ));
+      
+      // Upload file if selected
+      if (hasFile && messageId && selectedFile) {
+        // For web, use the File object directly
+        // For mobile, fetch the file from uri
+        let fileBlob: Blob | File;
+        
+        if (Platform.OS === 'web' && selectedFile.file) {
+          fileBlob = selectedFile.file;
+        } else {
+          // Mobile: fetch file from local URI
+          const response = await fetch(selectedFile.uri);
+          fileBlob = await response.blob();
+        }
+        
+        const uploadRes = await api.uploadFile(id, messageId, fileBlob, selectedFile.name);
+        if (uploadRes.data) {
+          // Update message with file info
+          setMessages(prev => prev.map(m => 
+            m.id === res.data!.id ? { ...res.data!, file_url: uploadRes.data!.url, status: 'sent' } : m
+          ));
+        }
+      } else {
+        setMessages(prev => prev.map(m => m.id === res.data!.id ? { ...res.data!, status: 'sent' } : m));
+      }
+
+      // Auto-scroll after message is confirmed
+      setTimeout(() => {
+        listRef.current?.scrollToEnd({ animated: true });
+      }, 100);
+
+      // Clear selected file and reply state
+      setSelectedFile(null);
+      setReplyingTo(null);
+    } catch (e) {
+      console.error('Send message error:', e);
+      
+      // Update message status to failed
+      setMessages(prev => prev.map(m => 
+        m.id === tempId ? { ...m, status: 'failed' } : m
+      ));
+      
+      // Add to failed messages queue for retry
+      setFailedMessages(prev => [...prev, {
+        tempId,
+        content: trimmed,
+        type: hasFile ? 'file' : 'text',
+        file: hasFile ? selectedFile : undefined,
+        replyTo: replyingTo?.id
+      }]);
+      
+      Alert.alert(
+        'Ошибка отправки',
+        'Не удалось отправить сообщение. Сообщение будет автоматически отправлено при восстановлении соединения.',
+        [
+          { text: 'OK', style: 'default' },
+          { text: 'Повторить', onPress: () => {
+            // Remove failed message and try again immediately
+            setMessages(prev => prev.filter(m => m.id !== tempId));
+            setFailedMessages(prev => prev.filter(msg => msg.tempId !== tempId));
+            setInput(trimmed);
+            if (hasFile) setSelectedFile(selectedFile);
+            setReplyingTo(replyingTo);
+          }}
+        ]
+      );
+    }
+  }, [id, user, input, selectedFile, replyingTo]);
+
+  // Retry failed messages when connection is restored
+  const retryFailedMessages = useCallback(async () => {
+    if (failedMessages.length === 0) return;
+    
+    console.log('[Chat] Retrying', failedMessages.length, 'failed messages');
+    
+    for (const failedMsg of failedMessages) {
+      try {
+        // Remove the failed message from UI first
+        setMessages(prev => prev.filter(m => m.id !== failedMsg.tempId));
+        
+        // Create new optimistic message
+        const newTempId = `retry-${Date.now()}-${Math.random()}`;
+        const optimistic: Message = {
+          id: newTempId,
+          chat_id: id!,
+          sender_id: user!.id,
+          type: failedMsg.type,
+          content: failedMsg.content,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          reply_to: failedMsg.replyTo,
+          status: 'sending',
+        };
+        setMessages(prev => [...prev, optimistic]);
+        
+        // Send message
+        const res = await api.sendMessage(id!, failedMsg.content, failedMsg.type, failedMsg.replyTo);
+        if (!res.data) {
+          throw new Error('Failed to send message');
+        }
+        
+        // Update message status to sent
+        setMessages(prev => prev.map(m => 
+          m.id === newTempId ? { ...m, id: res.data!.id, status: 'sent' } : m
+        ));
+        
+        // Upload file if needed
+        if (failedMsg.type === 'file' && failedMsg.file && res.data.id) {
+          let fileBlob: Blob | File;
+          
+          if (Platform.OS === 'web' && failedMsg.file.file) {
+            fileBlob = failedMsg.file.file;
+          } else {
+            const response = await fetch(failedMsg.file.uri);
+            fileBlob = await response.blob();
+          }
+          
+          const uploadRes = await api.uploadFile(id!, res.data.id, fileBlob, failedMsg.file.name);
+          if (uploadRes.data) {
+            setMessages(prev => prev.map(m => 
+              m.id === res.data!.id ? { ...res.data!, file_url: uploadRes.data!.url, status: 'sent' } : m
+            ));
+          }
+        }
+        
+        // Remove from failed messages queue
+        setFailedMessages(prev => prev.filter(msg => msg.tempId !== failedMsg.tempId));
+        
+      } catch (e) {
+        console.error('Retry message error:', e);
+        // Update status to failed again
+        setMessages(prev => prev.map(m => 
+          m.id.startsWith('retry-') ? { ...m, status: 'failed' } : m
+        ));
+      }
+    }
+  }, [failedMessages, id, user]);
+
   // WebSocket connection
   useEffect(() => {
     if (!token || !id) return;
@@ -799,8 +1073,42 @@ export default function ChatScreen() {
       wsService.joinChat(id);
     }, 500);
 
+    // Handle connection restored - retry failed messages
+    const unsubscribeConnect = wsService.onConnect(() => {
+      console.log('[Chat] WebSocket connected, retrying failed messages');
+      retryFailedMessages();
+    });
+
+    // Handle connection lost
+    const unsubscribeDisconnect = wsService.onDisconnect((reason: string) => {
+      console.log('[Chat] WebSocket disconnected:', reason);
+      // Mark sending messages as failed when connection is lost
+      setMessages(prev => prev.map(m => 
+        m.status === 'sending' ? { ...m, status: 'failed' } : m
+      ));
+    });
+
     const unsubscribe = wsService.onMessage((data: any) => {
       console.log('[Chat] WS message:', data.type, 'chat:', data.chat_id, 'current:', id);
+      
+      // Handle messages_loaded event (for current chat)
+      if (data.type === 'messages_loaded' && data.chat_id === id) {
+        console.log('[Chat] Messages loaded via WebSocket:', data.payload.messages?.length);
+        if (data.payload.messages) {
+          setMessages(data.payload.messages);
+          console.log('[Chat] WebSocket messages set successfully');
+        }
+        return;
+      }
+      
+      // Handle chats_loaded event
+      if (data.type === 'chats_loaded') {
+        console.log('[Chat] Chats loaded via WebSocket:', data.payload.chats?.length);
+        // Update chats list if needed
+        return;
+      }
+      
+      // Other events should be filtered by chat_id
       if (data.chat_id !== id) return;
       
       if (data.type === 'message_updated') {
@@ -913,127 +1221,54 @@ export default function ChatScreen() {
     return () => {
       clearTimeout(joinTimer);
       unsubscribe();
+      unsubscribeConnect();
+      unsubscribeDisconnect();
       wsService.leaveChat(id);
     };
-  }, [token, id]);
+  }, [token, id, retryFailedMessages]);
 
-  // Get last read message ID
-  const lastReadMessageId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
-      if (msg.sender_id === user?.id) {
-        const readByOthers = (msg.read_by || []).filter(id => id !== user?.id);
-        if (readByOthers.length > 0) {
-          return msg.id;
-        }
-      }
-    }
-    return null;
-  }, [messages, user]);
+  const retryMessage = useCallback(async (msg: Message) => {
+    if (!id || !user) return;
 
-  const listItems = useMemo(() => {
-    const items: ListItem[] = [];
-    let lastDate = '';
-    let hasShownUnreadDivider = false;
-    
-    // Find first unread message from others (not from me)
-    const firstUnreadIndex = messages.findIndex(m => 
-      m.sender_id !== user?.id && !(m.read_by || []).includes(user?.id || '')
-    );
-    
-    messages.forEach((m, index) => {
-      const date = dayjs(m.created_at).format('D MMMM YYYY');
-      if (date !== lastDate) {
-        items.push({ type: 'date', key: `date-${date}`, label: date });
-        lastDate = date;
-      }
-      
-      // Show "New messages" divider BEFORE first unread message from others
-      if (!hasShownUnreadDivider && index === firstUnreadIndex && firstUnreadIndex !== -1) {
-        items.push({ type: 'unread', key: 'unread-divider', label: 'Новые сообщения' });
-        hasShownUnreadDivider = true;
-      }
-      
-      items.push({ type: 'message', key: m.id, message: m });
-    });
-    return items;
-  }, [messages, user]);
+    // Remove the failed message from UI
+    setMessages(prev => prev.filter(m => m.id !== msg.id));
+    setFailedMessages(prev => prev.filter(fm => fm.tempId !== msg.id));
 
-  const sendMessage = useCallback(async () => {
-    const trimmed = input.trim();
-    const hasFile = selectedFile !== null;
-
-    if ((!trimmed && !hasFile) || !id || !user) return;
-
-    // Stop typing indicator
-    wsService.sendTyping(id, false, user.first_name, user.last_name);
-
-    setInput('');
-    const tempId = `temp-${Date.now()}`;
+    // Create new optimistic message
+    const newTempId = `retry-${Date.now()}-${Math.random()}`;
     const optimistic: Message = {
-      id: tempId,
+      id: newTempId,
       chat_id: id,
       sender_id: user.id,
-      type: hasFile ? 'file' : 'text',
-      content: trimmed || '[Файл]',
+      type: msg.type || 'text',
+      content: msg.content,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      reply_to: replyingTo?.id,
+      reply_to: msg.reply_to,
+      status: 'sending',
     };
     setMessages(prev => [...prev, optimistic]);
 
-    // Auto-scroll to bottom when sending message
-    setTimeout(() => {
-      listRef.current?.scrollToEnd({ animated: true });
-    }, 100);
-
     try {
-      // Send message first
-      const res = await api.sendMessage(id, trimmed || '[Файл]', hasFile ? 'file' : 'text', replyingTo?.id);
-      if (!res.data) {
-        throw new Error('Failed to send message');
-      }
-      
-      const messageId = res.data.id;
-      
-      // Upload file if selected
-      if (hasFile && messageId && selectedFile) {
-        // For web, use the File object directly
-        // For mobile, fetch the file from uri
-        let fileBlob: Blob | File;
-        
-        if (Platform.OS === 'web' && selectedFile.file) {
-          fileBlob = selectedFile.file;
-        } else {
-          // Mobile: fetch file from local URI
-          const response = await fetch(selectedFile.uri);
-          fileBlob = await response.blob();
-        }
-        
-        const uploadRes = await api.uploadFile(id, messageId, fileBlob, selectedFile.name);
-        if (uploadRes.data) {
-          // Update message with file info
-          setMessages(prev => prev.map(m => 
-            m.id === tempId ? { ...res.data!, file_url: uploadRes.data!.url } : m
-          ));
-        }
-      } else {
-        setMessages(prev => prev.map(m => m.id === tempId ? res.data! : m));
-        // Auto-scroll after message is confirmed
-        setTimeout(() => {
-          listRef.current?.scrollToEnd({ animated: true });
-        }, 100);
-      }
+      const res = await api.sendMessage(id, msg.content, msg.type || 'text', msg.reply_to);
+      if (!res.data) throw new Error('Failed to send message');
 
-      // Clear selected file and reply state
-      setSelectedFile(null);
-      setReplyingTo(null);
+      setMessages(prev => prev.map(m =>
+        m.id === newTempId ? { ...m, id: res.data!.id, status: 'sent' } : m
+      ));
     } catch (e) {
-      console.error('Send message error:', e);
-      setMessages(prev => prev.filter(m => m.id !== tempId));
-      Alert.alert('Ошибка', 'Не удалось отправить сообщение');
+      console.error('Retry message error:', e);
+      setMessages(prev => prev.map(m =>
+        m.id === newTempId ? { ...m, status: 'failed' } : m
+      ));
+      setFailedMessages(prev => [...prev, {
+        tempId: newTempId,
+        content: msg.content,
+        type: msg.type === 'file' ? 'file' : 'text',
+        replyTo: msg.reply_to,
+      }]);
     }
-  }, [id, user, input, selectedFile, replyingTo]);
+  }, [id, user]);
 
   const deleteMessage = useCallback(async (messageId: string) => {
     if (!id) return;
@@ -1067,24 +1302,48 @@ export default function ChatScreen() {
   const getSenderInfo = (senderId: string): User | null => {
     if (senderId === user?.id) return user as unknown as User;
     const sender = membersMap[senderId];
-    console.log('getSenderInfo:', { senderId, found: !!sender, email: sender?.email });
     return sender || null;
   };
 
-  // Status checkmark component - simplified: single = sent, double = read
+  // Status checkmark component - shows sending, sent, delivered, read, failed states
   const StatusCheckmarks = ({ msg }: { msg: Message }) => {
     const readByOthers = (msg.read_by || []).filter(id => id !== user?.id);
-    if (readByOthers.length === 0) {
-      // Single checkmark - not read by others yet
+    
+    // Failed status - show retry button
+    if (msg.status === 'failed') {
+      return (
+        <TouchableOpacity
+          onPress={() => retryMessage(msg)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <MaterialIcons name="refresh" size={14} color="#ff4444" />
+          <ThemedText style={{ fontSize: 10, color: '#ff4444', marginLeft: 2 }}>Повторить</ThemedText>
+        </TouchableOpacity>
+      );
+    }
+    
+    // Sending status - show loading indicator
+    if (msg.status === 'sending') {
+      return <ActivityIndicator size="small" color={textColor + '80'} />;
+    }
+    
+    // Delivered status - single checkmark
+    if (msg.status === 'delivered' || (!msg.status && readByOthers.length === 0)) {
       return <MaterialIcons name="check" size={14} color={textColor + '80'} />;
     }
-    // Double checkmark - read by at least one other person
-    return (
-      <View style={styles.doubleCheck}>
-        <MaterialIcons name="check" size={14} color={primaryColor} style={{ position: 'absolute', left: 0 }} />
-        <MaterialIcons name="check" size={14} color={primaryColor} style={{ position: 'absolute', left: 4 }} />
-      </View>
-    );
+    
+    // Read status - double checkmark
+    if (msg.status === 'read' || (!msg.status && readByOthers.length > 0)) {
+      return (
+        <View style={styles.doubleCheck}>
+          <MaterialIcons name="check" size={14} color={primaryColor} style={{ position: 'absolute', left: 0 }} />
+          <MaterialIcons name="check" size={14} color={primaryColor} style={{ position: 'absolute', left: 4 }} />
+        </View>
+      );
+    }
+    
+    // Default to sent status
+    return <MaterialIcons name="check" size={14} color={textColor + '80'} />;
   };
 
   const renderItem = useCallback(({ item }: { item: ListItem }) => {
@@ -1113,19 +1372,6 @@ export default function ChatScreen() {
     // In direct chats, any member can delete any message
     // In group chats, only owner/admin can delete others' messages
     const canDeleteMessage = isOwn || !isGroup || userRole === 'owner' || userRole === 'admin';
-    
-    // Debug logging
-    console.log('Message render:', { 
-      msgId: msg.id, 
-      isOwn, 
-      isGroup, 
-      userRole, 
-      canDeleteMessage, 
-      senderId: msg.sender_id, 
-      userId: user?.id,
-      forwarded_from: msg.forwarded_from,
-      forwarded_sender_name: msg.forwarded_sender_name,
-    });
     
     const handleContextMenu = (e: any) => {
       e.preventDefault();
@@ -1166,6 +1412,91 @@ export default function ChatScreen() {
 
     const showMenuButton = canDeleteMessage || isOwn;
 
+    const bubbleChildren: React.ReactNode[] = [];
+    if (msg.file_url) {
+      bubbleChildren.push(
+        <TouchableOpacity
+          key="file"
+          onPress={handleOpenFile}
+          style={[styles.fileAttachment, { backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.05)' }]}>
+          <MaterialIcons name="insert-drive-file" size={24} color={textColor} />
+          <ThemedText style={[styles.fileName, { color: textColor }]} numberOfLines={1}>
+            {msg.file_url.split('/').pop() || 'Файл'}
+          </ThemedText>
+          <MaterialIcons name="open-in-new" size={18} color={textColor} style={{ opacity: 0.7 }} />
+        </TouchableOpacity>
+      );
+    }
+    if (msg.forwarded_sender_name) {
+      bubbleChildren.push(
+        <View key="fwd" style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
+          <MaterialIcons name="forward" size={16} color={textColor} style={{ opacity: 0.8 }} />
+          <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
+            {'Переслано от ' + msg.forwarded_sender_name}
+          </ThemedText>
+        </View>
+      );
+    }
+    if (msg.reply_to_content) {
+      const replyText = msg.reply_to_content.length > 50 ? msg.reply_to_content.substring(0, 50) + '...' : msg.reply_to_content;
+      bubbleChildren.push(
+        <View key="reply" style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
+          <MaterialIcons name="reply" size={16} color={textColor} style={{ opacity: 0.8 }} />
+          <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
+            {'Ответ: ' + replyText}
+          </ThemedText>
+        </View>
+      );
+    }
+    if (msg.content) {
+      bubbleChildren.push(
+        <MentionText key="content" style={[styles.bubbleText, { color: textColor }]} text={msg.content} membersMap={membersMap} />
+      );
+    }
+    bubbleChildren.push(
+      <MessageReactions key="reactions" reactions={msg.reactions || []} compact={false} />
+    );
+    const timeRowChildren: React.ReactNode[] = [];
+    if (msg.pinned) {
+      timeRowChildren.push(<MaterialIcons key="pin" name="push-pin" size={14} color={primaryColor} style={{ marginRight: 4 }} />);
+    }
+    timeRowChildren.push(
+      <ThemedText key="time" style={[styles.time, { color: textColor, opacity: 0.7 }]}>
+        {dayjs(msg.created_at).format('HH:mm')}
+      </ThemedText>
+    );
+    if (msg.updated_at && msg.updated_at !== msg.created_at) {
+      timeRowChildren.push(
+        <ThemedText key="edited" style={[styles.editedLabel, { color: textColor, opacity: 0.5 }]}>
+          (изменено)
+        </ThemedText>
+      );
+    }
+    if (showStatus) {
+      const statusChildren: React.ReactNode[] = [];
+      if (uploading) {
+        statusChildren.push(
+          <View key="progress" style={styles.uploadProgressContainer}>
+            <ActivityIndicator size="small" color={primaryColor} />
+            <ThemedText style={styles.uploadProgressText}>
+              {'Загрузка файла... ' + Math.round(uploadProgress) + '%'}
+            </ThemedText>
+          </View>
+        );
+      }
+      statusChildren.push(<StatusCheckmarks key="status" msg={msg} />);
+      timeRowChildren.push(
+        <View key="statusWrap" style={styles.statusContainer}>
+          {statusChildren}
+        </View>
+      );
+    }
+    bubbleChildren.push(
+      <View key="timeRow" style={styles.timeRow}>
+        {timeRowChildren}
+      </View>
+    );
+
     const bubbleContent = (
       <Pressable
         onLongPress={() => handleMessageMenuPress(msg)}
@@ -1175,81 +1506,7 @@ export default function ChatScreen() {
           isOwn ? [styles.bubbleOwn, { backgroundColor: messageOutgoing }] : [styles.bubbleOther, { backgroundColor: messageIncoming }],
           pressed && { opacity: 0.9 }
         ]}>
-        {/* File attachment */}
-        {msg.file_url && (
-          <TouchableOpacity 
-            onPress={handleOpenFile}
-            style={[styles.fileAttachment, { backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.05)' }]}>
-            <MaterialIcons name="insert-drive-file" size={24} color={textColor} />
-            <ThemedText style={[styles.fileName, { color: textColor }]} numberOfLines={1}>
-              {msg.file_url.split('/').pop() || 'Файл'}
-            </ThemedText>
-            <MaterialIcons name="open-in-new" size={18} color={textColor} style={{ opacity: 0.7 }} />
-          </TouchableOpacity>
-        )}
-        {/* Forwarded from indicator - prominent bubble */}
-        {msg.forwarded_sender_name && (
-          <View style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
-            <MaterialIcons name="forward" size={16} color={textColor} style={{ opacity: 0.8 }} />
-            <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
-              Переслано от {msg.forwarded_sender_name}
-            </ThemedText>
-          </View>
-        )}
-        {/* Reply indicator - prominent bubble */}
-        {msg.reply_to_content && (
-          <View style={[styles.forwardedBubble, { backgroundColor: isOwn ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.05)' }]}>
-            <MaterialIcons name="reply" size={16} color={textColor} style={{ opacity: 0.8 }} />
-            <ThemedText style={[styles.forwardedBubbleText, { color: textColor }]}>
-              Ответ: {msg.reply_to_content.length > 50 ? msg.reply_to_content.substring(0, 50) + '...' : msg.reply_to_content}
-            </ThemedText>
-          </View>
-        )}
-        {/* Debug: check if message has forwarded fields */}
-        {msg.forwarded_from && !msg.forwarded_sender_name && (
-          <View style={[styles.forwardedBubble, { backgroundColor: 'rgba(255,0,0,0.1)', borderColor: 'red', borderWidth: 1 }]}>
-            <MaterialIcons name="forward" size={16} color="red" />
-            <ThemedText style={[styles.forwardedBubbleText, { color: 'red' }]}>
-              Переслано (без имени)
-            </ThemedText>
-          </View>
-        )}
-        <ThemedText style={[styles.bubbleText, { color: textColor }]}>
-          {msg.content}
-        </ThemedText>
-
-        {/* Reactions */}
-        <MessageReactions
-          reactions={msg.reactions || []}
-          compact={false}
-        />
-
-        <View style={styles.timeRow}>
-          {msg.pinned && (
-            <MaterialIcons name="push-pin" size={14} color={primaryColor} style={{ marginRight: 4 }} />
-          )}
-          <ThemedText style={[styles.time, { color: textColor, opacity: 0.7 }]}>
-            {dayjs(msg.created_at).format('HH:mm')}
-          </ThemedText>
-          {msg.updated_at && msg.updated_at !== msg.created_at && (
-            <ThemedText style={[styles.editedLabel, { color: textColor, opacity: 0.5 }]}>
-              (изменено)
-            </ThemedText>
-          )}
-          {showStatus && (
-            <View style={styles.statusContainer}>
-              {uploading && (
-                <View style={styles.uploadProgressContainer}>
-                  <ActivityIndicator size="small" color={primaryColor} />
-                  <ThemedText style={styles.uploadProgressText}>
-                    Загрузка файла... {Math.round(uploadProgress)}%
-                  </ThemedText>
-                </View>
-              )}
-              <StatusCheckmarks msg={msg} />
-            </View>
-          )}
-        </View>
+        {bubbleChildren}
       </Pressable>
     );
 
@@ -1314,7 +1571,7 @@ export default function ChatScreen() {
         {wrappedContent}
       </View>
     );
-  }, [user, membersMap, isGroup, messageOutgoing, messageIncoming, textColor, iconColor, handleMessageMenuPress, primaryColor, userRole]);
+  }, [user, membersMap, isGroup, messageOutgoing, messageIncoming, textColor, iconColor, handleMessageMenuPress, primaryColor, userRole, retryMessage]);
 
   // Show loading state
   if (loading) {
@@ -1354,15 +1611,17 @@ export default function ChatScreen() {
           keyExtractor={(item) => item.key}
           renderItem={renderItem}
           extraData={messages}
-          onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-          onLayout={() => listRef.current?.scrollToEnd({ animated: false })}
+          scrollEventThrottle={16}
+          removeClippedSubviews={true}
+          windowSize={21}
+          initialNumToRender={10}
+          maxToRenderPerBatch={5}
           onScrollToIndexFailed={(info) => {
             const wait = new Promise(resolve => setTimeout(resolve, 500));
             wait.then(() => {
               listRef.current?.scrollToIndex({ index: info.index, animated: true });
             });
           }}
-          contentContainerStyle={[styles.list, { paddingTop: insets.bottom + 60 }]}
         />
         {selectedFile && (
           <View style={[styles.selectedFileRow, { backgroundColor: surfaceColor }]}>

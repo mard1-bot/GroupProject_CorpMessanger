@@ -24,7 +24,9 @@ type Queue interface {
 }
 
 // MemoryQueue implements Queue using in-memory channels
-// TODO: Replace with Redis or RabbitMQ for production distributed systems
+// Note: This is a single-process in-memory queue. Messages are lost on process restart.
+// For production distributed systems, replace with Redis Streams or RabbitMQ.
+// The Queue interface allows easy migration to distributed message brokers.
 type MemoryQueue struct {
 	mu      sync.RWMutex
 	streams map[string]chan *Message

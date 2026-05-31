@@ -3,20 +3,22 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	stdhttp "net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"corp-messenger/backend/internal/auth"
+	"corp-messenger/backend/internal/crypto"
 	"corp-messenger/backend/internal/ejabberd"
 	"corp-messenger/backend/internal/livekit"
+	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/notifications"
 	"corp-messenger/backend/internal/storage"
 	"corp-messenger/backend/internal/websocket"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 )
 
 type Handler struct {
@@ -135,6 +138,31 @@ func (h *Handler) isAccountLocked(ctx context.Context, email string) (bool, erro
 	return count >= maxFailedAttempts, nil
 }
 
+// logAudit creates an audit log entry
+func (h *Handler) logAudit(ctx context.Context, userID uuid.UUID, action string, details map[string]interface{}) {
+	// Serialize details to JSON
+	detailsJSON := ""
+	if details != nil {
+		if b, err := json.Marshal(details); err == nil {
+			detailsJSON = string(b)
+		}
+	}
+
+	log := &models.AuditLog{
+		UserID:   userID,
+		Action:   action,
+		Resource: "gdpr",
+		Details:  detailsJSON,
+	}
+
+	// Log asynchronously to not block the request
+	go func() {
+		if err := h.storage.CreateAuditLog(context.Background(), log); err != nil {
+			h.logger.Error("failed to create audit log", "error", err, "user_id", userID, "action", action)
+		}
+	}()
+}
+
 // getClientIP extracts client IP with proxy-aware validation
 func getClientIP(r *stdhttp.Request) string {
 	// Prefer X-Forwarded-For but only take first IP (closest to client)
@@ -202,7 +230,7 @@ func (h *Handler) rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(resetTime.Unix(), 10))
 
 		if !allowed {
-			WriteError(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
+			WriteErrorCode(w, stdhttp.StatusTooManyRequests, "rate_limited", "Too many requests, please try again later")
 			return
 		}
 
@@ -210,7 +238,7 @@ func (h *Handler) rateLimitMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service, baseURL string, requests, window, entries int, syncService *xmppsync.SyncService, turnServerURI, turnUsername, turnPassword string, liveKit *livekit.Service) stdhttp.Handler {
+func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.Client, jwtSecret string, corsOrigins []string, sessionDuration time.Duration, hub *websocket.Hub, notificationSvc *notifications.Service, baseURL string, requests, window, entries int, syncService *xmppsync.SyncService, turnServerURI, turnUsername, turnPassword string, liveKit *livekit.Service, redisURL string) stdhttp.Handler {
 	// Set configurable rate limit values
 	if requests > 0 {
 		rateLimitRequests = requests
@@ -243,7 +271,10 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	websocket.AllowedOrigins = originsMap
 
 	// Initialize Redis rate limiter
-	rateLimiter := NewRedisRateLimiter("redis:6379")
+	if redisURL == "" {
+		redisURL = "redis:6379" // Default for local development
+	}
+	rateLimiter := NewRedisRateLimiter(redisURL)
 
 	h := &Handler{
 		logger:          logger,
@@ -270,16 +301,19 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	r.Use(SecurityHeadersMiddleware)
 	r.Use(CSRFProtectionMiddleware)
 	r.Use(h.corsMiddleware)
+	r.Use(ValidationMiddleware)
 	r.Use(AccessLogMiddleware(logger))
-	r.Use(RecoverMiddleware(logger))
+	r.Use(RecoveryMiddleware(logger))
 	r.Use(middleware.StripSlashes)
-	r.Use(AuditMiddleware(storage, logger))
 
 	r.Get("/health", h.health)
 	r.Get("/ready", h.ready)
 
 	// WebSocket endpoint - auth handled in handler (supports token in query param)
 	r.Get("/ws", h.handleWebSocket)
+
+	// Serve uploaded files — decrypt on-the-fly if encryption is enabled
+	r.Get("/uploads/{filename}", h.serveUploadedFile)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Auth endpoints with rate limiting
@@ -288,6 +322,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(h.jwt, h.storage))
+			r.Use(AuditMiddleware(storage, logger))
 
 			r.Post("/auth/logout", h.logout)
 			r.Get("/auth/me", h.getCurrentUser)
@@ -296,11 +331,39 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Get("/webrtc/turn", h.getTurnConfig)
 
 			r.Get("/users", h.getUsers)
+			r.Get("/users/{id}", h.getUserByID)
 			r.Put("/users/me/status", h.updateUserStatus)
 			r.Post("/users/me/avatar", h.uploadAvatar)
 			r.Get("/users/me/mentions", h.getUserMentions)
 
-			// ... (rest of the code remains the same)
+			// 2FA routes (admin only)
+			r.Route("/2fa", func(r chi.Router) {
+				r.Use(AdminOnly)
+				r.Post("/setup", h.setupTwoFactor)
+				r.Post("/enable", h.enableTwoFactor)
+				r.Post("/disable", h.disableTwoFactor)
+				r.Post("/verify", h.verifyTwoFactor)
+				r.Get("/status", h.getTwoFactorStatus)
+				r.Post("/backup-codes/regenerate", h.regenerateBackupCodes)
+			})
+
+			// Admin routes (admin only)
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(AdminOnly)
+				r.Get("/stats", h.adminGetStats)
+				r.Get("/users", h.adminGetUsers)
+				r.Get("/users/{id}", h.adminGetUserByID)
+				r.Post("/users", h.adminCreateUser)
+				r.Put("/users/{id}", h.adminUpdateUser)
+				r.Put("/users/{id}/role", h.adminChangeRole)
+				r.Post("/users/{id}/block", h.adminBlockUser)
+				r.Post("/users/{id}/unblock", h.adminUnblockUser)
+				r.Delete("/users/{id}", h.adminDeleteUser)
+				r.Post("/users/{id}/reset-password", h.adminResetPassword)
+				r.Get("/audit-logs", h.adminGetAuditLogs)
+				r.Delete("/audit-logs", h.deleteAuditLogs)
+			})
+
 			r.Post("/chats", h.createChat)
 			r.Get("/chats", h.getUserChats)
 			// Chat-specific routes must be declared before generic /chats/{id} to avoid conflicts
@@ -360,24 +423,63 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Delete("/bookmarks/{id}", h.removeBookmark)
 			r.Get("/bookmarks", h.getBookmarks)
 
-			// Blocking
-			r.Post("/users/block", h.blockUser)
-			r.Delete("/users/block/{id}", h.unblockUser)
-			r.Get("/users/blocked", h.getBlockedUsers)
-
-			// Audit logs (admin only)
-			r.With(AdminOnly).Get("/audit/logs", h.getAuditLogs)
-			r.With(AdminOnly).Get("/audit/logs/all", h.getAllAuditLogs)
+			r.NotFound(h.notFound)
 		})
 	})
 
-	// Static file server for uploads
-	fileServer := http.FileServer(http.Dir("./uploads"))
-	r.Handle("/uploads/*", http.StripPrefix("/uploads/", fileServer))
-
-	r.NotFound(h.notFound)
-
 	return r
+}
+
+// serveUploadedFile serves files from the uploads directory, decrypting them
+// on-the-fly with AES-256-GCM when the master encryption key is available.
+func (h *Handler) serveUploadedFile(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	filename := chi.URLParam(r, "filename")
+	if filename == "" {
+		WriteErrorCode(w, stdhttp.StatusBadRequest, "invalid_request", "Filename is required")
+		return
+	}
+	// Prevent path traversal
+	filename = filepath.Base(filename)
+
+	filePath := filepath.Join("./uploads", filename)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			WriteErrorCode(w, stdhttp.StatusNotFound, "not_found", "File not found")
+		} else {
+			h.logger.Error("failed to read uploaded file", "error", err, "filename", filename)
+			WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "Failed to read file")
+		}
+		return
+	}
+
+	// Attempt decryption if master key is available; fall back to raw bytes otherwise
+	plaintext := data
+	if crypto.IsInitialized() {
+		if decrypted, decErr := crypto.DecryptBytes(data); decErr == nil {
+			plaintext = decrypted
+		}
+		// If decryption fails the file was likely stored before encryption was enabled —
+		// serve the raw bytes so existing files remain accessible.
+	}
+
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	mimeTypes := map[string]string{
+		"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+		"gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+		"pdf": "application/pdf", "txt": "text/plain", "mp3": "audio/mpeg",
+		"mp4": "video/mp4", "webm": "video/webm", "ogg": "audio/ogg",
+	}
+	contentType := mimeTypes[ext]
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", "inline; filename=\""+filename+"\"")
+	w.Header().Set("Content-Length", strconv.Itoa(len(plaintext)))
+	w.WriteHeader(stdhttp.StatusOK)
+	w.Write(plaintext) //nolint:errcheck
 }
 
 func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
@@ -416,39 +518,31 @@ func (h *Handler) corsMiddleware(next stdhttp.Handler) stdhttp.Handler {
 	})
 }
 
-func decodeJSON(r io.Reader, v interface{}) error {
-	decoder := json.NewDecoder(r)
-	decoder.DisallowUnknownFields()
-	return decoder.Decode(v)
-}
-
 func (h *Handler) getTurnConfig(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
-	// Return TURN server configuration without credentials
-	// For production, implement TURN REST API for temporary credentials
+	// Return TURN server configuration with credentials
+	// Note: For production, implement TURN REST API for temporary credentials
 	config := map[string]interface{}{}
 	if h.turnServerURI != "" {
 		// Validate that TURN credentials are actually configured
 		if h.turnUsername == "" || h.turnPassword == "" {
 			h.logger.Error("TURN server URI configured but credentials are missing")
-			WriteError(w, stdhttp.StatusServiceUnavailable, "turn_misconfigured", "TURN server is not properly configured")
+			WriteErrorCode(w, stdhttp.StatusServiceUnavailable, "turn_misconfigured", "TURN server is not properly configured")
 			return
 		}
 		config["turn_server_uri"] = h.turnServerURI
-		// Do not expose TURN credentials to client
-		// In production, use TURN REST API to generate temporary credentials
-		// with short expiration based on user ID
+		config["turn_username"] = h.turnUsername
+		config["turn_password"] = h.turnPassword
 	}
 
 	WriteJSON(w, stdhttp.StatusOK, map[string]interface{}{
 		"user_id": claims.UserID,
 		"turn":    config,
-		"info":    "TURN credentials not exposed. Configure TURN REST API for production.",
 	})
 }
 
@@ -474,20 +568,20 @@ func (h *Handler) handleWebSocket(w stdhttp.ResponseWriter, r *stdhttp.Request) 
 		// Try to get token from query parameter (for WebSocket connections)
 		token := r.URL.Query().Get("token")
 		if token == "" {
-			WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Authentication required for WebSocket")
+			WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Authentication required for WebSocket")
 			return
 		}
 		var err error
 		claims, err = h.jwt.ParseToken(token)
 		if err != nil {
-			WriteError(w, stdhttp.StatusUnauthorized, "invalid_token", "Invalid or expired token")
+			WriteErrorCode(w, stdhttp.StatusUnauthorized, "invalid_token", "Invalid or expired token")
 			return
 		}
 	}
 
 	if err := websocket.ServeWs(h.hub, w, r, claims.UserID); err != nil {
 		h.logger.Error("websocket upgrade failed", "error", err)
-		WriteError(w, stdhttp.StatusInternalServerError, "websocket_error", "Failed to upgrade connection")
+		WriteErrorCode(w, stdhttp.StatusInternalServerError, "websocket_error", "Failed to upgrade connection")
 		return
 	}
 }

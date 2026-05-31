@@ -63,7 +63,7 @@ func RecoverMiddleware(logger *slog.Logger) func(stdhttp.Handler) stdhttp.Handle
 			defer func() {
 				if rec := recover(); rec != nil {
 					logger.Error("panic recovered", "method", r.Method, "path", r.URL.Path, "panic", fmt.Sprint(rec), "stack", string(debug.Stack()))
-					WriteError(w, stdhttp.StatusInternalServerError, "internal", "internal server error")
+					WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "internal server error")
 				}
 			}()
 			next.ServeHTTP(w, r)

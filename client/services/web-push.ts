@@ -44,6 +44,7 @@ class WebPushService {
   }
 
   async subscribeUser(): Promise<void> {
+    console.log('[WebPush] subscribeUser called, registration:', !!this.registration);
     if (!this.registration) {
       console.warn('[WebPush] Service Worker not registered');
       return;
@@ -51,8 +52,9 @@ class WebPushService {
 
     try {
       // Convert VAPID public key from base64 to Uint8Array
-      const vapidPublicKey = 'BH_xzs0hCskJdrMdi84_cm24zeWzyCSskp9Kp5NKyuTg1gq3k4nIIaKq_cGxNyDfnHenKdCiwreO2hd2Tkdirzo';
+      const vapidPublicKey = 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo';
       const convertedVapidKey = this.urlBase64ToUint8Array(vapidPublicKey) as BufferSource;
+      console.log('[WebPush] VAPID key converted, attempting subscription...');
 
       this.subscription = await this.registration.pushManager.subscribe({
         userVisibleOnly: true,

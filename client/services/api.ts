@@ -6,7 +6,7 @@ import { Platform } from 'react-native';
 
 const BACKEND_IP = process.env.EXPO_PUBLIC_BACKEND_IP;
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const BACKEND_PORT = process.env.EXPO_PUBLIC_BACKEND_PORT || '3000';
+const BACKEND_PORT = process.env.EXPO_PUBLIC_BACKEND_PORT || '8080';
 const USE_LOCALHOST = process.env.EXPO_PUBLIC_USE_LOCALHOST === 'true';
 
 if (!BACKEND_URL && !BACKEND_IP && !USE_LOCALHOST) {
@@ -134,6 +134,7 @@ export interface AuthResponse {
 class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  public onAuthError: (() => void) | null = null;
 
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
@@ -175,12 +176,15 @@ class ApiClient {
       if (!response.ok) {
         if (isJson) {
           const errorData = await response.json();
-          return {
-            error: errorData.error || {
-              code: `http_${response.status}`,
-              message: response.statusText,
-            },
+          const error = errorData.error || {
+            code: `http_${response.status}`,
+            message: response.statusText,
           };
+          // Auto-logout on expired/revoked session
+          if (error.code === 'session_expired' || error.code === 'invalid_token') {
+            this.onAuthError?.();
+          }
+          return { error };
         }
         return {
           error: {
@@ -496,6 +500,7 @@ class ApiClient {
     quiet_hours_end?: string;
     quiet_hours_enabled: boolean;
     protocol_preference?: 'websocket' | 'xmpp';
+    hybrid_mode_enabled: boolean;
   }>> {
     return this.request('GET', '/api/v1/notifications/settings');
   }
@@ -508,6 +513,7 @@ class ApiClient {
     quiet_hours_end?: string;
     quiet_hours_enabled: boolean;
     protocol_preference?: 'websocket' | 'xmpp';
+    hybrid_mode_enabled: boolean;
   }): Promise<ApiResponse<any>> {
     return this.request('PUT', '/api/v1/notifications/settings', data);
   }
@@ -541,15 +547,40 @@ class ApiClient {
   }
 
   async getAuditLogs(): Promise<ApiResponse<any[]>> {
-    return this.request('GET', '/api/v1/audit/logs');
+    return this.request('GET', '/api/v1/admin/audit-logs');
   }
 
   async getAllAuditLogs(): Promise<ApiResponse<any[]>> {
-    return this.request('GET', '/api/v1/audit/logs/all');
+    return this.request('GET', '/api/v1/admin/audit-logs');
+  }
+
+  async deleteAuditLogs(beforeDate?: string): Promise<ApiResponse<{ deleted_count: number; message: string }>> {
+    const params = beforeDate ? `?before_date=${encodeURIComponent(beforeDate)}` : '';
+    return this.request('DELETE', `/api/v1/admin/audit-logs${params}`);
   }
 
   async getAllUsers(): Promise<ApiResponse<User[]>> {
-    return this.request('GET', '/api/v1/users?all=true');
+    return this.request('GET', '/api/v1/admin/users');
+  }
+
+  async adminDeleteUser(userId: string): Promise<ApiResponse<any>> {
+    return this.request('DELETE', `/api/v1/admin/users/${userId}`);
+  }
+
+  async adminBlockUser(userId: string): Promise<ApiResponse<any>> {
+    return this.request('POST', `/api/v1/admin/users/${userId}/block`);
+  }
+
+  async adminUnblockUser(userId: string): Promise<ApiResponse<any>> {
+    return this.request('POST', `/api/v1/admin/users/${userId}/unblock`);
+  }
+
+  async adminChangeRole(userId: string, role: string): Promise<ApiResponse<any>> {
+    return this.request('PUT', `/api/v1/admin/users/${userId}/role`, { role });
+  }
+
+  async adminResetPassword(userId: string, newPassword: string): Promise<ApiResponse<any>> {
+    return this.request('POST', `/api/v1/admin/users/${userId}/reset-password`, { password: newPassword });
   }
 }
 

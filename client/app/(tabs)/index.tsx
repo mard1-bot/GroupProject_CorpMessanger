@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import dayjs from 'dayjs';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
 import { FlatList, Pressable, StyleSheet, TextInput, View, ActivityIndicator, Platform, Alert, TouchableOpacity } from 'react-native';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -26,11 +27,27 @@ export default function ChatsScreen() {
   const iconColor = useThemeColor({}, 'icon');
   const bgColor = useThemeColor({}, 'background');
 
-  useEffect(() => {
-    if (!isAuthLoading) {
-      loadChats();
+  const loadChats = useCallback(async () => {
+    setLoading(true);
+    
+    try {
+      const res = await api.getUserChats();
+      if (res.data) setChats(res.data);
+    } catch (error) {
+      console.error('Failed to load chats:', error);
+    } finally {
+      setLoading(false);
     }
-  }, [isAuthLoading]);
+  }, []);
+
+  // Load chats when tab gets focus or auth is ready
+  useFocusEffect(
+    useCallback(() => {
+      if (!isAuthLoading && currentUser) {
+        loadChats();
+      }
+    }, [isAuthLoading, currentUser, loadChats])
+  );
 
   // WebSocket connection and event handling
   useEffect(() => {
@@ -41,8 +58,7 @@ export default function ChatsScreen() {
     }
 
     const unsubscribe = wsService.onMessage((message) => {
-      console.log('[Chats] WebSocket message:', message.type, message.chat_id);
-
+      console.log('[Chat List] WebSocket message received:', message.type, message.payload);
       if (message.type === WS_EVENTS.CHAT_CREATED) {
         const newChat = message.payload.chat as Chat;
         setChats(prev => {
@@ -57,6 +73,11 @@ export default function ChatsScreen() {
         setChats(prev => prev.filter(c => c.id !== deletedChatId));
       } else if (message.type === WS_EVENTS.NEW_MESSAGE) {
         // Reload chats to get updated preview and move chat to top
+        console.log('[Chat List] NEW_MESSAGE received, reloading chats');
+        loadChats();
+      } else if (message.type === 'chat_updated') {
+        // Update chat list when chat is updated (new message, etc.)
+        console.log('[Chat List] chat_updated received, reloading chats');
         loadChats();
       }
     });
@@ -64,20 +85,7 @@ export default function ChatsScreen() {
     return () => {
       unsubscribe();
     };
-  }, [isAuthLoading]);
-
-  const loadChats = async () => {
-    setLoading(true);
-    try {
-      const res = await api.getUserChats();
-      console.log('Chats loaded:', JSON.stringify(res.data?.[0], null, 2));
-      if (res.data) setChats(res.data);
-    } catch (error) {
-      console.error('Failed to load chats:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [isAuthLoading, loadChats]);
 
   const getOtherParticipant = (chat: Chat, userId: string) => {
     if (chat.type !== 'direct') return null;
@@ -339,13 +347,14 @@ export default function ChatsScreen() {
   const renderItem = ({ item: chat }: { item: (typeof filteredChats)[0] }) => {
     const other = currentUser ? getOtherParticipant(chat, currentUser.id) : null;
     const displayName = getChatDisplayName(chat);
-    const time = dayjs(chat.updated_at).format('HH:mm');
+    const time = dayjs(chat.last_message_at || chat.updated_at).format('HH:mm');
     const initials = other 
       ? `${other.first_name?.[0] || ''}${other.last_name?.[0] || ''}`.toUpperCase() || other.username?.[0]?.toUpperCase() || '?'
       : (chat.title?.[0]?.toUpperCase() || '?');
     const myMember = chat.members?.find(m => m.user_id === currentUser?.id);
     const isMuted = myMember?.muted;
     const isPinned = myMember?.pinned;
+    const preview = chat.last_message || 'Нет сообщений';
 
     return (
       <View style={styles.rowContainer}>
@@ -377,7 +386,7 @@ export default function ChatsScreen() {
               </View>
             </View>
             <ThemedText numberOfLines={1} style={styles.preview}>
-              {'Новое сообщение'}
+              {preview}
             </ThemedText>
           </View>
         </Pressable>

@@ -58,6 +58,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
+  // Setup auto-logout on auth errors (session_expired, invalid_token)
+  useEffect(() => {
+    api.onAuthError = () => {
+      console.log('Auth error detected, clearing auth state');
+      clearAuthState();
+    };
+    return () => { api.onAuthError = null; };
+  }, []);
+
   // Load auth state from storage on mount
   useEffect(() => {
     loadAuthState();
@@ -72,6 +81,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return cleanup;
     }
   }, [token, user]);
+
+  // Periodically refresh user data to sync role changes
+  useEffect(() => {
+    if (!token) return;
+    const interval = setInterval(() => {
+      refreshUser();
+    }, 30000); // every 30s
+    return () => clearInterval(interval);
+  }, [token]);
 
   const loadAuthState = async () => {
     try {

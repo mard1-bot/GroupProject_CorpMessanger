@@ -32,15 +32,37 @@ class NativeCallService {
   private onStateChangeCallbacks: ((state: CallState | null) => void)[] = [];
   private onLocalStreamCallbacks: ((stream: MediaStream) => void)[] = [];
   private onRemoteStreamCallbacks: ((stream: MediaStream) => void)[] = [];
+  private pendingIceCandidates: { candidate: string; sdp_mline_index: number | null; sdp_mid: string | null }[] = [];
 
   private configuration = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+      { urls: 'stun:stun.services.mozilla.com' },
+      { urls: 'stun:global.stun.twilio.com:3478' },
     ],
   };
 
   constructor() {
+    // Add TURN server if configured via environment variables
+    const turnServerUri = process.env.EXPO_PUBLIC_TURN_SERVER_URI;
+    const turnUsername = process.env.EXPO_PUBLIC_TURN_USERNAME;
+    const turnPassword = process.env.EXPO_PUBLIC_TURN_PASSWORD;
+
+    if (turnServerUri && turnUsername && turnPassword) {
+      this.configuration.iceServers.push({
+        urls: turnServerUri,
+        username: turnUsername,
+        credential: turnPassword,
+      } as any);
+      console.log('[WebRTC Native] Using TURN server:', turnServerUri);
+    } else {
+      console.warn('[WebRTC Native] TURN server not configured - calls may fail behind NAT');
+    }
+
     this.setupWebSocketListeners();
   }
 
@@ -51,6 +73,7 @@ class NativeCallService {
           if (this.currentCall?.isCaller && !this.currentCall?.callId && message.payload?.call_id) {
             this.currentCall.callId = message.payload.call_id;
             this.currentCall.callerId = message.payload.caller_id;
+            this.flushPendingIceCandidates();
             this.notifyStateChange();
           } else {
             this.handleIncomingCall(message.payload);
@@ -76,6 +99,20 @@ class NativeCallService {
           break;
       }
     });
+  }
+
+  private flushPendingIceCandidates() {
+    if (!this.currentCall?.callId) return;
+    const callId = this.currentCall.callId;
+    for (const ice of this.pendingIceCandidates) {
+      wsService.send('call_ice', {
+        call_id: callId,
+        candidate: ice.candidate,
+        sdp_mline_index: ice.sdp_mline_index,
+        sdp_mid: ice.sdp_mid,
+      });
+    }
+    this.pendingIceCandidates = [];
   }
 
   private notifyStateChange() {
@@ -114,12 +151,21 @@ class NativeCallService {
 
     (pc as any).addEventListener('icecandidate', (event: any) => {
       if (event.candidate && this.currentCall) {
-        wsService.send('call_ice', {
-          call_id: this.currentCall.callId,
-          candidate: event.candidate.candidate,
-          sdp_mline_index: event.candidate.sdpMLineIndex,
-          sdp_mid: event.candidate.sdpMid,
-        });
+        if (this.currentCall.callId) {
+          wsService.send('call_ice', {
+            call_id: this.currentCall.callId,
+            candidate: event.candidate.candidate,
+            sdp_mline_index: event.candidate.sdpMLineIndex,
+            sdp_mid: event.candidate.sdpMid,
+          });
+        } else {
+          // Buffer ICE candidates until callId is assigned
+          this.pendingIceCandidates.push({
+            candidate: event.candidate.candidate,
+            sdp_mline_index: event.candidate.sdpMLineIndex,
+            sdp_mid: event.candidate.sdpMid,
+          });
+        }
       }
     });
 
@@ -290,6 +336,7 @@ class NativeCallService {
     this.remoteStream = null;
     this.pc = null;
     this.currentCall = null;
+    this.pendingIceCandidates = [];
 
     this.notifyStateChange();
   }

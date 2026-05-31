@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"net/http"
 	stdhttp "net/http"
 	"strconv"
 	"strings"
@@ -138,8 +139,28 @@ func determineResource(path string) string {
 
 // extractResourceID extracts resource ID from path
 func extractResourceID(path string) string {
-	// Simple extraction - could be improved with proper parsing
-	// For now, return empty string as it's optional
+	// Extract ID from patterns like /api/v1/chats/{id}, /api/v1/users/{id}, etc.
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		// Check if this part looks like a UUID
+		if len(part) == 36 && strings.Count(part, "-") == 4 {
+			// Found a UUID, return the resource type from previous part
+			if i > 0 {
+				resourceType := parts[i-1]
+				// Handle plural forms
+				if resourceType == "chats" || resourceType == "chat" {
+					return part
+				}
+				if resourceType == "users" || resourceType == "user" {
+					return part
+				}
+				if resourceType == "messages" || resourceType == "message" {
+					return part
+				}
+				return part
+			}
+		}
+	}
 	return ""
 }
 
@@ -147,7 +168,7 @@ func extractResourceID(path string) string {
 func (h *Handler) getAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -168,11 +189,51 @@ func (h *Handler) getAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	logs, err := h.storage.GetAuditLogs(r.Context(), claims.UserID, limit, offset)
 	if err != nil {
 		h.logger.Error("failed to get audit logs", "error", err)
-		WriteError(w, stdhttp.StatusInternalServerError, "internal", "Failed to get audit logs")
+		WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "Failed to get audit logs")
 		return
 	}
 
-	WriteJSON(w, stdhttp.StatusOK, logs)
+	WriteJSON(w, http.StatusOK, map[string]interface{}{"logs": logs})
+}
+
+// deleteAuditLogs deletes audit logs (admin only)
+func (h *Handler) deleteAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	claims, ok := auth.ClaimsFromContext(r.Context())
+	if !ok {
+		WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		return
+	}
+
+	// Check admin role
+	if claims.Role != "admin" {
+		WriteErrorCode(w, stdhttp.StatusForbidden, "forbidden", "Admin only")
+		return
+	}
+
+	// Parse query parameters
+	var beforeDate *time.Time
+	if bd := r.URL.Query().Get("before_date"); bd != "" {
+		if parsed, err := time.Parse(time.RFC3339, bd); err == nil {
+			beforeDate = &parsed
+		} else {
+			WriteErrorCode(w, stdhttp.StatusBadRequest, "invalid_date", "Invalid date format, use RFC3339")
+			return
+		}
+	}
+
+	// Delete logs
+	deleted, err := h.storage.DeleteAuditLogs(r.Context(), beforeDate)
+	if err != nil {
+		h.logger.Error("failed to delete audit logs", "error", err)
+		WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "Failed to delete audit logs")
+		return
+	}
+
+	h.logger.Info("audit logs deleted", "deleted_count", deleted, "before_date", beforeDate)
+	WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"deleted_count": deleted,
+		"message":       "Audit logs deleted successfully",
+	})
 }
 
 // getAllAuditLogs returns all audit logs (admin only)
@@ -180,18 +241,18 @@ func (h *Handler) getAllAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) 
 	// Defense in depth: verify user is authenticated and has admin role
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	// Get user to verify admin role (defense in depth)
 	user, err := h.storage.GetUserByID(r.Context(), claims.UserID)
 	if err != nil || user == nil {
-		WriteError(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, stdhttp.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 	if user.Role != models.UserRoleAdmin {
-		WriteError(w, stdhttp.StatusForbidden, "forbidden", "Admin access required")
+		WriteErrorCode(w, stdhttp.StatusForbidden, "forbidden", "Admin access required")
 		return
 	}
 
@@ -212,7 +273,7 @@ func (h *Handler) getAllAuditLogs(w stdhttp.ResponseWriter, r *stdhttp.Request) 
 	logs, err := h.storage.GetAllAuditLogs(r.Context(), limit, offset)
 	if err != nil {
 		h.logger.Error("failed to get all audit logs", "error", err)
-		WriteError(w, stdhttp.StatusInternalServerError, "internal", "Failed to get audit logs")
+		WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "Failed to get audit logs")
 		return
 	}
 

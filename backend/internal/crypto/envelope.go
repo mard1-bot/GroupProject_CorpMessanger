@@ -82,6 +82,71 @@ func Encrypt(plaintext string) (string, error) {
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
+// EncryptBytes encrypts binary data using AES-256-GCM with the master key.
+// Returns ciphertext with nonce prepended (no base64 encoding).
+func EncryptBytes(plaintext []byte) ([]byte, error) {
+	masterKeyMutex.RLock()
+	key := make([]byte, len(masterKey))
+	copy(key, masterKey)
+	masterKeyMutex.RUnlock()
+
+	if len(key) == 0 {
+		return nil, errors.New("master key not initialized")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("failed to generate nonce: %w", err)
+	}
+
+	return gcm.Seal(nonce, nonce, plaintext, nil), nil
+}
+
+// DecryptBytes decrypts binary data encrypted by EncryptBytes.
+func DecryptBytes(ciphertext []byte) ([]byte, error) {
+	masterKeyMutex.RLock()
+	key := make([]byte, len(masterKey))
+	copy(key, masterKey)
+	masterKeyMutex.RUnlock()
+
+	if len(key) == 0 {
+		return nil, errors.New("master key not initialized")
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GCM: %w", err)
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, errors.New("ciphertext too short")
+	}
+
+	nonce, data := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt: %w", err)
+	}
+
+	return plaintext, nil
+}
+
 // Decrypt decrypts base64-encoded ciphertext using AES-256-GCM with the master key
 func Decrypt(ciphertext string) (string, error) {
 	masterKeyMutex.RLock()

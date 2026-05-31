@@ -77,9 +77,10 @@ type FCMResponse struct {
 	} `json:"results"`
 }
 
-// Send sends push notification to a device
-// TODO: Migrate to FCM HTTP v1 API which requires OAuth2 token from service account
-// instead of legacy server key. See: https://firebase.google.com/docs/cloud-messaging/migrate-v1
+// Send sends push notification to a device using legacy FCM API
+// Note: FCM HTTP v1 API is available in fcm_v1.go with OAuth2 support.
+// This legacy client is kept for backward compatibility with existing deployments.
+// To migrate to v1, use FCMClientV1 instead. See: https://firebase.google.com/docs/cloud-messaging/migrate-v1
 func (c *FCMClient) Send(ctx context.Context, deviceToken, title, body string, data map[string]string) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("FCM not configured: FIREBASE_SERVER_KEY not set")

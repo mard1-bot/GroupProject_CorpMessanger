@@ -1,0 +1,1175 @@
+openapi: 3.0.3
+info:
+  title: CorpMessenger API
+  description: |
+    ## Корпоративный мессенджер API
+    
+    CorpMessenger - это современная платформа для корпоративной коммуникации с поддержкой:
+    - Real-time сообщений через WebSocket
+    - Шифрования end-to-end
+    - Файлового обмена
+    - Голосовых и видеозвонков через WebRTC
+    - Поиска по сообщениям
+    - Управления пользователями и чатами
+    - Аудита действий
+    - Push-уведомлений
+    
+    ### Аутентификация
+    API использует JWT токены для аутентификации. Токен должен передаваться в заголовке:
+    ```
+    Authorization: Bearer <token>
+    ```
+    
+    ### Rate Limiting
+    API ограничивает количество запросов для предотвращения злоупотреблений.
+    
+    ### Версионирование
+    Текущая версия API: v1
+    
+    ### Коды ошибок
+    - 200: Успешно
+    - 201: Создано
+    - 400: Неверный запрос
+    - 401: Неавторизован
+    - 403: Доступ запрещен
+    - 404: Не найдено
+    - 429: Слишком много запросов
+    - 500: Внутренняя ошибка сервера
+    
+  version: 1.0.0
+  contact:
+    name: CorpMessenger Team
+    email: support@corpmessenger.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Development server
+  - url: https://api.corpmessenger.com/api/v1
+    description: Production server
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Проверка состояния сервиса
+      description: Возвращает текущее состояние API и зависимостей
+      responses:
+        '200':
+          description: Сервис работает нормально
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Регистрация нового пользователя
+      description: Создает новый аккаунт пользователя
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Пользователь успешно зарегистрирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Вход в систему
+      description: Аутентифицирует пользователя и возвращает JWT токен
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Успешная аутентификация
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '423':
+          description: Аккаунт заблокирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Обновление токена
+      description: Обновляет JWT токен с помощью refresh токена
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Токен успешно обновлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/profile:
+    get:
+      tags:
+        - Users
+      summary: Получение профиля пользователя
+      description: Возвращает информацию о текущем пользователе
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags:
+        - Users
+      summary: Обновление профиля пользователя
+      description: Обновляет информацию о текущем пользователе
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: Профиль успешно обновлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users:
+    get:
+      tags:
+        - Users
+      summary: Поиск пользователей
+      description: Поиск пользователей по имени или email
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: search
+          in: query
+          description: Строка поиска
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Максимальное количество результатов
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Список пользователей
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /chats:
+    get:
+      tags:
+        - Chats
+      summary: Получение списка чатов
+      description: Возвращает список чатов текущего пользователя
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Список чатов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Chat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      tags:
+        - Chats
+      summary: Создание нового чата
+      description: Создает новый личный или групповой чат
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatRequest'
+      responses:
+        '201':
+          description: Чат успешно создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /chats/{chatId}:
+    get:
+      tags:
+        - Chats
+      summary: Получение информации о чате
+      description: Возвращает детальную информацию о чате
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Информация о чате
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags:
+        - Chats
+      summary: Обновление чата
+      description: Обновляет настройки чата (только для владельцев и администраторов)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChatRequest'
+      responses:
+        '200':
+          description: Чат успешно обновлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - Chats
+      summary: Удаление чата
+      description: Удаляет чат (только для владельцев)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Чат успешно удален
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages:
+    get:
+      tags:
+        - Messages
+      summary: Получение сообщений чата
+      description: Возвращает сообщения из чата с пагинацией
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: before
+          in: query
+          description: Получить сообщения до указанного ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Список сообщений
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags:
+        - Messages
+      summary: Отправка сообщения
+      description: Отправляет новое сообщение в чат
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Сообщение успешно отправлено
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages/search:
+    get:
+      tags:
+        - Messages
+      summary: Поиск сообщений в чате
+      description: Ищет сообщения по тексту в указанном чате
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: chatId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: q
+          in: query
+          required: true
+          description: Текст для поиска
+          schema:
+            type: string
+            minLength: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Результаты поиска
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /messages/search:
+    get:
+      tags:
+        - Messages
+      summary: Глобальный поиск сообщений
+      description: Ищет сообщения по всем чатам пользователя
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Текст для поиска
+          schema:
+            type: string
+            minLength: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+      responses:
+        '200':
+          description: Результаты поиска
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /files/upload:
+    post:
+      tags:
+        - Files
+      summary: Загрузка файла
+      description: Загружает файл и прикрепляет его к сообщению
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                message_id:
+                  type: string
+                  format: uuid
+              required:
+                - file
+      responses:
+        '200':
+          description: Файл успешно загружен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/RequestTooLarge'
+
+  /notifications/settings:
+    get:
+      tags:
+        - Notifications
+      summary: Получение настроек уведомлений
+      description: Возвращает текущие настройки push-уведомлений
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Настройки уведомлений
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+
+    put:
+      tags:
+        - Notifications
+      summary: Обновление настроек уведомлений
+      description: Обновляет настройки push-уведомлений
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateNotificationSettingsRequest'
+      responses:
+        '200':
+          description: Настройки обновлены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /audit/logs:
+    get:
+      tags:
+        - Audit
+      summary: Получение логов аудита
+      description: Возвращает логи действий пользователя (только для администраторов)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Логи аудита
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AuditLog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+          example: 1.0.0
+        services:
+          type: object
+          properties:
+            database:
+              type: string
+              example: healthy
+            redis:
+              type: string
+              example: healthy
+            websocket:
+              type: string
+              example: healthy
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: invalid_input
+            message:
+              type: string
+              example: Invalid input data
+            details:
+              type: object
+        success:
+          type: boolean
+          example: false
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 123e4567-e89b-12d3-a456-426614174000
+        email:
+          type: string
+          format: email
+          example: user@example.com
+        username:
+          type: string
+          example: johndoe
+        first_name:
+          type: string
+          example: John
+        last_name:
+          type: string
+          example: Doe
+        phone:
+          type: string
+          example: +1234567890
+        avatar_url:
+          type: string
+          format: uri
+          example: https://example.com/avatar.jpg
+        status:
+          type: string
+          enum: [active, inactive, away]
+          example: active
+        role:
+          type: string
+          enum: [user, admin]
+          example: user
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        last_online:
+          type: string
+          format: date-time
+
+    Chat:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [direct, group]
+          example: group
+        title:
+          type: string
+          example: Team Chat
+        description:
+          type: string
+          example: General team discussion
+        avatar_url:
+          type: string
+          format: uri
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        member_count:
+          type: integer
+          example: 5
+        unread_count:
+          type: integer
+          example: 3
+        muted:
+          type: boolean
+          example: false
+        pinned:
+          type: boolean
+          example: false
+        archived:
+          type: boolean
+          example: false
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMember'
+
+    ChatMember:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [owner, admin, member]
+          example: member
+        joined_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        chat_id:
+          type: string
+          format: uuid
+        sender_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+          example: Hello, world!
+        type:
+          type: string
+          enum: [text, file, image, voice, video, location, system]
+          example: text
+        file_url:
+          type: string
+          format: uri
+        thumbnail_url:
+          type: string
+          format: uri
+        file_name:
+          type: string
+          example: document.pdf
+        file_size:
+          type: integer
+          example: 1024000
+        latitude:
+          type: number
+          format: float
+        longitude:
+          type: number
+          format: float
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        read_by:
+          type: array
+          items:
+            type: string
+            format: uuid
+        reactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reaction'
+        pinned:
+          type: boolean
+          example: false
+        scheduled_at:
+          type: string
+          format: date-time
+        thread_id:
+          type: string
+          format: uuid
+        reply_to:
+          type: string
+          format: uuid
+        reply_to_content:
+          type: string
+        reply_to_sender_name:
+          type: string
+        forwarded_from:
+          type: string
+          format: uuid
+        forwarded_sender_name:
+          type: string
+        status:
+          type: string
+          enum: [sending, sent, delivered, read, failed]
+          example: sent
+        sender:
+          $ref: '#/components/schemas/User'
+
+    Reaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        message_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        emoji:
+          type: string
+          example: 👍
+        created_at:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+
+    RegisterRequest:
+      type: object
+      required:
+        - email
+        - password
+        - username
+        - first_name
+        - last_name
+      properties:
+        email:
+          type: string
+          format: email
+          example: user@example.com
+        password:
+          type: string
+          minLength: 8
+          example: Password123!
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+          example: johndoe
+        first_name:
+          type: string
+          example: John
+        last_name:
+          type: string
+          example: Doe
+        phone:
+          type: string
+          example: +1234567890
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: user@example.com
+        password:
+          type: string
+          example: Password123!
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        user:
+          $ref: '#/components/schemas/User'
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        first_name:
+          type: string
+          example: John
+        last_name:
+          type: string
+          example: Doe
+        phone:
+          type: string
+          example: +1234567890
+        status:
+          type: string
+          enum: [active, inactive, away]
+
+    CreateChatRequest:
+      type: object
+      required:
+        - type
+        - members
+      properties:
+        type:
+          type: string
+          enum: [direct, group]
+          example: group
+        title:
+          type: string
+          example: Team Chat
+        description:
+          type: string
+          example: General team discussion
+        members:
+          type: array
+          items:
+            type: string
+            format: uuid
+          example: ["123e4567-e89b-12d3-a456-426614174000"]
+
+    UpdateChatRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          example: Updated Chat Title
+        description:
+          type: string
+          example: Updated description
+
+    SendMessageRequest:
+      type: object
+      required:
+        - content
+        - type
+      properties:
+        content:
+          type: string
+          example: Hello, world!
+        type:
+          type: string
+          enum: [text, file, image, voice, video, location]
+          example: text
+        reply_to:
+          type: string
+          format: uuid
+        thread_id:
+          type: string
+          format: uuid
+        scheduled_at:
+          type: string
+          format: date-time
+        latitude:
+          type: number
+          format: float
+        longitude:
+          type: number
+          format: float
+
+    FileUploadResponse:
+      type: object
+      properties:
+        file_url:
+          type: string
+          format: uri
+          example: https://example.com/files/abc123.pdf
+        file_name:
+          type: string
+          example: document.pdf
+        file_size:
+          type: integer
+          example: 1024000
+        content_type:
+          type: string
+          example: application/pdf
+
+    NotificationSettings:
+      type: object
+      properties:
+        push_enabled:
+          type: boolean
+          example: true
+        email_enabled:
+          type: boolean
+          example: true
+        quiet_hours_enabled:
+          type: boolean
+          example: false
+        quiet_hours_start:
+          type: string
+          pattern: ^([01]?[0-9]|2[0-3]):[0-5][0-9]$
+          example: 22:00
+        quiet_hours_end:
+          type: string
+          pattern: ^([01]?[0-9]|2[0-3]):[0-5][0-9]$
+          example: 08:00
+        mute_mentions:
+          type: boolean
+          example: false
+
+    UpdateNotificationSettingsRequest:
+      type: object
+      properties:
+        push_enabled:
+          type: boolean
+        email_enabled:
+          type: boolean
+        quiet_hours_enabled:
+          type: boolean
+        quiet_hours_start:
+          type: string
+          pattern: ^([01]?[0-9]|2[0-3]):[0-5][0-9]$
+        quiet_hours_end:
+          type: string
+          pattern: ^([01]?[0-9]|2[0-3]):[0-5][0-9]$
+        mute_mentions:
+          type: boolean
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          example: login
+        resource:
+          type: string
+          example: auth
+        details:
+          type: object
+        ip_address:
+          type: string
+          example: 192.168.1.1
+        user_agent:
+          type: string
+          example: Mozilla/5.0...
+        created_at:
+          type: string
+          format: date-time
+
+  responses:
+    BadRequest:
+      description: Неверный запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Unauthorized:
+      description: Неавторизован
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Forbidden:
+      description: Доступ запрещен
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    Conflict:
+      description: Конфликт
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    RequestTooLarge:
+      description: Слишком большой запрос
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+tags:
+  - name: Health
+    description: Проверка состояния сервиса
+  - name: Authentication
+    description: Аутентификация и авторизация
+  - name: Users
+    description: Управление пользователями
+  - name: Chats
+    description: Управление чатами
+  - name: Messages
+    description: Работа с сообщениями
+  - name: Files
+    description: Файловый обмен
+  - name: Notifications
+    description: Уведомления
+  - name: Audit
+    description: Аудит действий

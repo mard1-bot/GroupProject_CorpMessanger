@@ -29,6 +29,7 @@ type NotificationSettingsRequest struct {
 	QuietHoursEnd      *string `json:"quiet_hours_end,omitempty"`
 	QuietHoursEnabled  bool    `json:"quiet_hours_enabled"`
 	ProtocolPreference string  `json:"protocol_preference,omitempty"` // "websocket" or "xmpp"
+	HybridModeEnabled  bool    `json:"hybrid_mode_enabled"`           // Enable XMPP hybrid mode
 }
 
 type WebPushSubscriptionRequest struct {
@@ -40,7 +41,7 @@ type WebPushSubscriptionRequest struct {
 func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -48,13 +49,13 @@ func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req RegisterDeviceRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	if req.Token == "" || req.Platform == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "token and platform are required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_fields", "token and platform are required")
 		return
 	}
 
@@ -69,7 +70,7 @@ func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.storage.CreateDeviceToken(r.Context(), token); err != nil {
 		h.logger.Error("failed to register device", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to register device")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to register device")
 		return
 	}
 
@@ -79,14 +80,14 @@ func (h *Handler) registerDevice(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) getNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	settings, err := h.storage.GetNotificationSettings(r.Context(), claims.UserID)
 	if err != nil {
 		h.logger.Error("failed to get settings", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get settings")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get settings")
 		return
 	}
 
@@ -96,7 +97,7 @@ func (h *Handler) getNotificationSettings(w http.ResponseWriter, r *http.Request
 func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -105,7 +106,7 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 	var req NotificationSettingsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.logger.Error("failed to decode notification settings request", "error", err)
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
@@ -116,19 +117,20 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 		"email_enabled", req.EmailEnabled,
 		"quiet_hours_enabled", req.QuietHoursEnabled,
 		"quiet_hours_start", req.QuietHoursStart,
-		"quiet_hours_end", req.QuietHoursEnd)
+		"quiet_hours_end", req.QuietHoursEnd,
+		"hybrid_mode_enabled", req.HybridModeEnabled)
 
 	// Validate quiet hours format (HH:MM)
 	timeRegex := regexp.MustCompile(`^([01]?[0-9]|2[0-3]):([0-5][0-9])$`)
 	if req.QuietHoursEnabled {
 		if req.QuietHoursStart != nil && !timeRegex.MatchString(*req.QuietHoursStart) {
 			h.logger.Error("invalid quiet_hours_start format", "value", *req.QuietHoursStart)
-			WriteError(w, http.StatusBadRequest, "invalid_time", "Quiet hours start must be in HH:MM format")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_time", "Quiet hours start must be in HH:MM format")
 			return
 		}
 		if req.QuietHoursEnd != nil && !timeRegex.MatchString(*req.QuietHoursEnd) {
 			h.logger.Error("invalid quiet_hours_end format", "value", *req.QuietHoursEnd)
-			WriteError(w, http.StatusBadRequest, "invalid_time", "Quiet hours end must be in HH:MM format")
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_time", "Quiet hours end must be in HH:MM format")
 			return
 		}
 	}
@@ -136,7 +138,7 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 	// Validate protocol preference
 	if req.ProtocolPreference != "" && req.ProtocolPreference != "websocket" && req.ProtocolPreference != "xmpp" {
 		h.logger.Error("invalid protocol preference", "value", req.ProtocolPreference)
-		WriteError(w, http.StatusBadRequest, "invalid_protocol", "Protocol preference must be 'websocket' or 'xmpp'")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_protocol", "Protocol preference must be 'websocket' or 'xmpp'")
 		return
 	}
 
@@ -159,11 +161,12 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 		QuietHoursEnd:      req.QuietHoursEnd,
 		QuietHoursEnabled:  req.QuietHoursEnabled,
 		ProtocolPreference: protocolPreference,
+		HybridModeEnabled:  req.HybridModeEnabled,
 	}
 
 	if err := h.storage.UpdateNotificationSettings(r.Context(), settings); err != nil {
 		h.logger.Error("failed to update notification settings in storage", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to update settings")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to update settings")
 		return
 	}
 
@@ -174,14 +177,14 @@ func (h *Handler) updateNotificationSettings(w http.ResponseWriter, r *http.Requ
 func (h *Handler) getUnreadCount(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
 	count, err := h.storage.GetTotalUnreadCount(r.Context(), claims.UserID)
 	if err != nil {
 		h.logger.Error("failed to get unread count", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to get unread count")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get unread count")
 		return
 	}
 
@@ -233,7 +236,7 @@ func truncateString(s string, maxLen int) string {
 func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -241,13 +244,13 @@ func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Req
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req WebPushSubscriptionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	if req.Endpoint == "" || req.Key == "" || req.Auth == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "endpoint, key, and auth are required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_fields", "endpoint, key, and auth are required")
 		return
 	}
 
@@ -259,15 +262,15 @@ func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Req
 	)
 
 	if len(req.Endpoint) > maxEndpointLength {
-		WriteError(w, http.StatusBadRequest, "endpoint_too_long", fmt.Sprintf("endpoint must be at most %d characters", maxEndpointLength))
+		WriteErrorCode(w, http.StatusBadRequest, "endpoint_too_long", fmt.Sprintf("endpoint must be at most %d characters", maxEndpointLength))
 		return
 	}
 	if len(req.Key) > maxKeyLength {
-		WriteError(w, http.StatusBadRequest, "key_too_long", fmt.Sprintf("key must be at most %d characters", maxKeyLength))
+		WriteErrorCode(w, http.StatusBadRequest, "key_too_long", fmt.Sprintf("key must be at most %d characters", maxKeyLength))
 		return
 	}
 	if len(req.Auth) > maxAuthLength {
-		WriteError(w, http.StatusBadRequest, "auth_too_long", fmt.Sprintf("auth must be at most %d characters", maxAuthLength))
+		WriteErrorCode(w, http.StatusBadRequest, "auth_too_long", fmt.Sprintf("auth must be at most %d characters", maxAuthLength))
 		return
 	}
 
@@ -282,7 +285,7 @@ func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Req
 
 	if err := h.storage.CreateWebPushSubscription(r.Context(), subscription); err != nil {
 		h.logger.Error("failed to create web push subscription", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to create subscription")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to create subscription")
 		return
 	}
 
@@ -294,7 +297,7 @@ func (h *Handler) registerWebPushSubscription(w http.ResponseWriter, r *http.Req
 func (h *Handler) unregisterWebPushSubscription(w http.ResponseWriter, r *http.Request) {
 	claims, ok := auth.ClaimsFromContext(r.Context())
 	if !ok {
-		WriteError(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
+		WriteErrorCode(w, http.StatusUnauthorized, "unauthorized", "Unauthorized")
 		return
 	}
 
@@ -302,19 +305,19 @@ func (h *Handler) unregisterWebPushSubscription(w http.ResponseWriter, r *http.R
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var req WebPushSubscriptionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
+		WriteErrorCode(w, http.StatusBadRequest, "invalid_body", "Invalid request body")
 		return
 	}
 	defer r.Body.Close()
 
 	if req.Endpoint == "" {
-		WriteError(w, http.StatusBadRequest, "missing_fields", "endpoint is required")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_fields", "endpoint is required")
 		return
 	}
 
 	if err := h.storage.DeleteWebPushSubscription(r.Context(), claims.UserID, req.Endpoint); err != nil {
 		h.logger.Error("failed to delete web push subscription", "error", err)
-		WriteError(w, http.StatusInternalServerError, "internal", "Failed to delete subscription")
+		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to delete subscription")
 		return
 	}
 

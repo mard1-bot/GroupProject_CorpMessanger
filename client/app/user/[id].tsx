@@ -21,7 +21,7 @@ export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const navigation = useNavigation();
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, isLoading: isAuthLoading } = useAuth();
 
   const [userData, setUserData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -44,9 +44,9 @@ export default function UserProfileScreen() {
   }, [navigation, router, primaryColor]);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || isAuthLoading) return;
     loadUser();
-  }, [id]);
+  }, [id, isAuthLoading]);
 
   const loadUser = async () => {
     try {
@@ -94,9 +94,11 @@ export default function UserProfileScreen() {
         <ThemedText style={[styles.name, { color: textColor }]}>
           {userData.first_name} {userData.last_name}
         </ThemedText>
-        <ThemedText style={[styles.username, { color: iconColor }]}>
-          @{userData.username}
-        </ThemedText>
+        {userData.username && (
+          <ThemedText style={[styles.username, { color: iconColor }]}>
+            @{userData.username}
+          </ThemedText>
+        )}
         <ThemedText style={[styles.email, { color: iconColor }]}>
           {userData.email}
         </ThemedText>
@@ -116,6 +118,14 @@ export default function UserProfileScreen() {
             {userData.first_name} {userData.last_name}
           </ThemedText>
         </View>
+        {userData.username && (
+          <View style={styles.infoRow}>
+            <MaterialIcons name="alternate-email" size={20} color={iconColor} />
+            <ThemedText style={[styles.infoText, { color: textColor }]}>
+              @{userData.username}
+            </ThemedText>
+          </View>
+        )}
       </View>
     </ThemedView>
   );

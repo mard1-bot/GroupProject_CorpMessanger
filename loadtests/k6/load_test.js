@@ -27,16 +27,19 @@ const testUser = {
 export function setup() {
   // Setup: Register a test user
   const registerRes = http.post(
-    `${BASE_URL}/api/register`,
+    `${BASE_URL}/api/v1/auth/register`,
     JSON.stringify(testUser),
     {
       headers: { 'Content-Type': 'application/json' },
     }
   );
-  
+  check(registerRes, {
+    'register status is 201 or 409': (r) => r.status === 201 || r.status === 409,
+  });
+
   // Login to get token
   const loginRes = http.post(
-    `${BASE_URL}/api/login`,
+    `${BASE_URL}/api/v1/auth/login`,
     JSON.stringify({
       email: testUser.email,
       password: testUser.password,
@@ -45,7 +48,8 @@ export function setup() {
       headers: { 'Content-Type': 'application/json' },
     }
   );
-  
+  check(loginRes, { 'login status is 200': (r) => r.status === 200 });
+
   const token = JSON.parse(loginRes.body).token;
   return { token };
 }
@@ -63,21 +67,27 @@ export default function (data) {
   });
 
   // Test 2: Get current user
-  let userRes = http.get(`${BASE_URL}/api/users/me`, { headers });
+  let userRes = http.get(`${BASE_URL}/api/v1/auth/me`, { headers });
   check(userRes, {
     'user profile status is 200': (r) => r.status === 200,
   });
 
   // Test 3: Get user chats
-  let chatsRes = http.get(`${BASE_URL}/api/chats`, { headers });
+  let chatsRes = http.get(`${BASE_URL}/api/v1/chats`, { headers });
   check(chatsRes, {
     'chats status is 200': (r) => r.status === 200,
   });
 
   // Test 4: Search users
-  let searchRes = http.get(`${BASE_URL}/api/users?search=test`, { headers });
+  let searchRes = http.get(`${BASE_URL}/api/v1/users?search=test`, { headers });
   check(searchRes, {
     'search status is 200': (r) => r.status === 200,
+  });
+
+  // Test 5: Search messages (global)
+  let msgSearchRes = http.get(`${BASE_URL}/api/v1/messages/search?q=test`, { headers });
+  check(msgSearchRes, {
+    'message search status is 200': (r) => r.status === 200,
   });
 
   sleep(1);

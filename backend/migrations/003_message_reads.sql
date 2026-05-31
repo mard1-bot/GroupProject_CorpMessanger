@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS message_reads (
 );
 
 -- Index for fetching read status by message
-CREATE INDEX idx_message_reads_message_id ON message_reads(message_id);
+CREATE INDEX IF NOT EXISTS idx_message_reads_message_id ON message_reads(message_id);
 
 -- Index for fetching read status by user
-CREATE INDEX idx_message_reads_user_id ON message_reads(user_id);
+CREATE INDEX IF NOT EXISTS idx_message_reads_user_id ON message_reads(user_id);
