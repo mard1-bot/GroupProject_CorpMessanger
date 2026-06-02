@@ -44,6 +44,30 @@ services:
     tmpfs:
       - /tmp
 
+  glitchtip:
+    image: glitchtip/glitchtip:latest
+    container_name: corp-glitchtip
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://corpmessenger:${POSTGRES_PASSWORD}@postgres:5432/glitchtip?sslmode=disable
+      SECRET_KEY_FILE: /run/secrets/glitchtip_secret_key
+      EMAIL_URL: smtp://localhost
+      DEFAULT_FROM_EMAIL: noreply@corpmessenger.com
+      ENABLE_USER_REGISTRATION: "false"
+      DEPLOY: "docker"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets:
+      - glitchtip_secret_key
+      - postgres_password
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
   livekit:
     image: livekit/livekit-server:latest
     container_name: corp-livekit
@@ -174,6 +198,7 @@ services:
       TLS_KEY_PATH: /certs/server.key
       SCHEDULER_ENABLED: "true"
       REDIS_URL: redis:6379
+      SENTRY_DSN_FILE: /run/secrets/sentry_dsn
     depends_on:
       postgres:
         condition: service_healthy
@@ -193,6 +218,7 @@ services:
       - livekit_api_secret
       - encryption_master_key
       - cors_origins
+      - sentry_dsn
     security_opt:
       - no-new-privileges:true
     tmpfs:
@@ -222,3 +248,7 @@ secrets:
     file: ./.secrets/cors_origins
   turn_password:
     file: ./.secrets/turn_password
+  glitchtip_secret_key:
+    file: ./.secrets/glitchtip_secret_key
+  sentry_dsn:
+    file: ./.secrets/sentry_dsn

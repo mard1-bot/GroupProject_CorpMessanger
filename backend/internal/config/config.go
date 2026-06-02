@@ -47,6 +47,7 @@ type Config struct {
 	LiveKitAPIKey        string
 	LiveKitAPISecret     string
 	RedisURL             string
+	SentryDSN            string
 }
 
 func Load() (Config, error) {
@@ -216,6 +217,9 @@ func Load() (Config, error) {
 	if cfg.RedisURL == "" {
 		cfg.RedisURL = "redis:6379" // Default for local development
 	}
+
+	// Parse Sentry DSN (optional - error tracking)
+	cfg.SentryDSN = optional("SENTRY_DSN")
 
 	return cfg, nil
 }

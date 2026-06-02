@@ -64,6 +64,18 @@ if [ ! -f "$SECRETS_DIR/turn_password" ] || [ "${FORCE:-0}" = "1" ]; then
   echo "  ✓ turn_password"
 fi
 
+# Glitchtip secret key
+if [ ! -f "$SECRETS_DIR/glitchtip_secret_key" ] || [ "${FORCE:-0}" = "1" ]; then
+  rand_base64 64 > "$SECRETS_DIR/glitchtip_secret_key"
+  echo "  ✓ glitchtip_secret_key"
+fi
+
+# Sentry DSN — must be set manually after Glitchtip setup
+if [ ! -f "$SECRETS_DIR/sentry_dsn" ]; then
+  echo "https://your-sentry-dsn@glitchtip.yourdomain.com/project-id" > "$SECRETS_DIR/sentry_dsn"
+  echo "  ✓ sentry_dsn  ⚠  Edit .secrets/sentry_dsn with your Glitchtip DSN!"
+fi
+
 # CORS origins — must be set manually to your real domain
 if [ ! -f "$SECRETS_DIR/cors_origins" ]; then
   echo "https://your-domain.com" > "$SECRETS_DIR/cors_origins"

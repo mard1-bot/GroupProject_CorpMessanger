@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/getsentry/sentry-go"
+
 	"corp-messenger/backend/internal/config"
 	"corp-messenger/backend/internal/crypto"
 	"corp-messenger/backend/internal/ejabberd"
@@ -46,6 +48,21 @@ func New() (*App, error) {
 	logg, err := logger.New(cfg.AppEnv, cfg.LogLevel)
 	if err != nil {
 		return nil, fmt.Errorf("init logger: %w", err)
+	}
+
+	// Initialize Sentry if DSN is provided
+	if cfg.SentryDSN != "" {
+		err := sentry.Init(sentry.ClientOptions{
+			Dsn:              cfg.SentryDSN,
+			Environment:      cfg.AppEnv,
+			Release:          "1.0.0",
+			TracesSampleRate: 1.0,
+		})
+		if err != nil {
+			logg.Warn("failed to initialize Sentry", "error", err)
+		} else {
+			logg.Info("Sentry initialized", "dsn", cfg.SentryDSN)
+		}
 	}
 
 	// Initialize encryption master key for envelope encryption

@@ -4,6 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useColorScheme as useRNColorScheme, Platform } from 'react-native';
 import 'react-native-reanimated';
 import { useEffect } from 'react';
+import * as Sentry from '@sentry/react-native';
 
 import { AuthProvider } from '@/contexts/auth-context';
 import { CallProvider } from '@/contexts/call-context';
@@ -12,6 +13,17 @@ import { useThemeStore } from '@/store/theme';
 // Import CSS for web
 if (Platform.OS === 'web') {
   require('@/assets/global.css');
+}
+
+// Initialize Sentry
+const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN || '';
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    debug: __DEV__,
+    environment: __DEV__ ? 'development' : 'production',
+    tracesSampleRate: 1.0,
+  });
 }
 
 export const unstable_settings = {
