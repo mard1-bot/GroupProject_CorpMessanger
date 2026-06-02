@@ -247,6 +247,7 @@ docker-compose up -d  # без LiveKit
 
 - [Production Deployment Guide](docs/PRODUCTION_DEPLOYMENT.md) — полное руководство по развёртыванию в продакшен
 - [Error Tracking with Glitchtip](docs/ERROR_TRACKING.md) — настройка отслеживания ошибок
+- [Expo Push Notifications](docs/EXPO_PUSH.md) — настройка Expo Push уведомлений
 - [WebRTC и XMPP настройка](docs/WEBRTC_XMPP_SETUP.md)
 - [FCM v1 миграция](docs/FCM_V1_MIGRATION.md)
 - [Безопасность](README_SECURITY.md)

@@ -24,6 +24,7 @@ type Service struct {
 	logger          *slog.Logger
 	storage         storage.Storage
 	fcm             *FCMClientV1
+	expoPush        *ExpoPushClient
 	smtpHost        string
 	smtpPort        int
 	smtpUser        string
@@ -41,6 +42,16 @@ func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) 
 		// Don't return error - FCM is optional
 	} else {
 		logger.Info("FCM v1 configured successfully")
+	}
+
+	// Initialize Expo Push client
+	expoAPIKey := os.Getenv("EXPO_PUSH_API_KEY")
+	var expoPush *ExpoPushClient
+	if expoAPIKey != "" {
+		expoPush = NewExpoPushClient(expoAPIKey, logger)
+		logger.Info("Expo Push API configured")
+	} else {
+		logger.Warn("Expo Push API not configured")
 	}
 
 	// Email config from env
@@ -74,6 +85,7 @@ func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) 
 		logger:          logger,
 		storage:         storage,
 		fcm:             fcm,
+		expoPush:        expoPush,
 		smtpHost:        smtpHost,
 		smtpPort:        smtpPort,
 		smtpUser:        smtpUser,
@@ -138,8 +150,32 @@ func (s *Service) sendPush(ctx context.Context, userID uuid.UUID, payload *Notif
 			s.logger.Error("get device tokens", "error", err, "user_id", userID)
 		} else {
 			for _, token := range tokens {
+				// Skip Expo tokens when using FCM
+				if isExpoToken(token.Token) {
+					continue
+				}
 				if err := s.fcm.Send(ctx, token.Token, payload.Title, payload.Body, payload.Data); err != nil {
 					s.logger.Error("fcm send failed", "error", err, "token", token.Token)
+				}
+			}
+		}
+	}
+
+	// Send Expo Push notifications
+	if s.expoPush != nil && s.expoPush.IsConfigured() {
+		tokens, err := s.storage.GetDeviceTokens(ctx, userID)
+		if err != nil {
+			s.logger.Error("get device tokens for Expo", "error", err, "user_id", userID)
+		} else {
+			expoTokens := make([]string, 0)
+			for _, token := range tokens {
+				if isExpoToken(token.Token) {
+					expoTokens = append(expoTokens, token.Token)
+				}
+			}
+			if len(expoTokens) > 0 {
+				if err := s.expoPush.SendMulticast(ctx, expoTokens, payload.Title, payload.Body, payload.Data); err != nil {
+					s.logger.Error("expo push send failed", "error", err, "user_id", userID)
 				}
 			}
 		}
@@ -153,6 +189,11 @@ func (s *Service) sendPush(ctx context.Context, userID uuid.UUID, payload *Notif
 	}
 
 	return nil
+}
+
+// isExpoToken checks if a token is an Expo push token
+func isExpoToken(token string) bool {
+	return len(token) > 20 && (token[:18] == "ExponentPushToken[" || token[:14] == "ExpoPushToken[")
 }
 
 func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
