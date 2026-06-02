@@ -1,0 +1,45 @@
+{
+  "cli": {
+    "version": ">= 5.2.0"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": {
+        "bundleIdentifier": "com.corpmessenger.app"
+      },
+      "android": {
+        "bundleIdentifier": "com.corpmessenger.app"
+      }
+    },
+    "production": {
+      "ios": {
+        "bundleIdentifier": "com.corpmessenger.app",
+        "autoIncrement": true
+      },
+      "android": {
+        "bundleIdentifier": "com.corpmessenger.app",
+        "autoIncrement": true
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "your-apple-id@example.com",
+        "ascAppId": "YOUR_APP_STORE_CONNECT_APP_ID",
+        "appleTeamId": "YOUR_APPLE_TEAM_ID"
+      },
+      "android": {
+        "serviceAccountKeyPath": "./google-service-account.json"
+      }
+    }
+  }
+}

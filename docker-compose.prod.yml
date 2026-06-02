@@ -66,6 +66,52 @@ services:
     tmpfs:
       - /tmp
 
+  coturn:
+    image: coturn/coturn:latest
+    container_name: corp-coturn
+    restart: unless-stopped
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "5349:5349/udp"
+    environment:
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-$(curl -s ifconfig.me)}
+      TURN_USERNAME: ${TURN_USERNAME:-turnuser}
+      TURN_PASSWORD: ${TURN_PASSWORD_FILE:-/run/secrets/turn_password}
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./certs:/certs:ro
+      - ./data/coturn:/var/log/turnserver
+    secrets:
+      - turn_password
+    command: ["coturn", "-c", "/etc/coturn/turnserver.conf"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+
+  nginx:
+    image: nginx:alpine
+    container_name: corp-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/certs:ro
+      - ./data/nginx/logs:/var/log/nginx
+      - ./data/certbot:/var/www/certbot
+    depends_on:
+      backend:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run/nginx
+
   ejabberd:
     image: ejabberd/ecs:24.07
     container_name: corp-ejabberd
@@ -104,6 +150,8 @@ services:
     ports:
       - "8080:8080"
       - "8443:8443"
+    expose:
+      - "8080"
     environment:
       APP_ENV: prod
       HTTP_PORT: 8080
@@ -172,3 +220,5 @@ secrets:
     file: ./.secrets/encryption_master_key
   cors_origins:
     file: ./.secrets/cors_origins
+  turn_password:
+    file: ./.secrets/turn_password

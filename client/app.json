@@ -36,7 +36,7 @@
       "output": "static",
       "favicon": "./assets/images/favicon.png",
       "notification": {
-        "vapidPublicKey": "BDdU_gSSV5QZKEKjJ5L5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X5X"
+        "vapidPublicKey": "BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo"
       }
     },
     "plugins": [

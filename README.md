@@ -245,9 +245,38 @@ docker-compose up -d  # без LiveKit
 
 ## Документация
 
+- [Production Deployment Guide](docs/PRODUCTION_DEPLOYMENT.md) — полное руководство по развёртыванию в продакшен
 - [WebRTC и XMPP настройка](docs/WEBRTC_XMPP_SETUP.md)
 - [FCM v1 миграция](docs/FCM_V1_MIGRATION.md)
 - [Безопасность](README_SECURITY.md)
+
+## Production Deployment
+
+Для развёртывания в продакшен используйте:
+
+```bash
+# 1. Сгенерируйте секреты
+bash scripts/generate-secrets.sh
+
+# 2. Сгенерируйте TLS сертификаты (Let's Encrypt или self-signed)
+bash scripts/generate-certs.sh
+
+# 3. Настройте TURN сервер с публичным IP
+export TURN_EXTERNAL_IP=$(curl -s ifconfig.me)
+
+# 4. Запустите в production режиме
+docker compose -f docker-compose.prod.yml up -d
+
+# 5. Установите пароль администратора
+docker compose -f docker-compose.prod.yml exec backend /app/api setadminpass "YourSecurePassword123!"
+```
+
+**Важно:** Прочитайте [Production Deployment Guide](docs/PRODUCTION_DEPLOYMENT.md) для полной инструкции по настройке продакшен-сервера, включая:
+- Настройку Let's Encrypt сертификатов
+- Конфигурацию Nginx reverse proxy с rate limiting
+- Автоматические бэкапы PostgreSQL
+- Настройку TURN сервера для WebRTC
+- Сборку мобильных приложений с EAS Build
 
 ## Лицензия
 

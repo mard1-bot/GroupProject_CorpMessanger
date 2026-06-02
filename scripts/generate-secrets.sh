@@ -58,6 +58,12 @@ if [ ! -f "$SECRETS_DIR/ejabberd_password" ] || [ "${FORCE:-0}" = "1" ]; then
   echo "  ✓ ejabberd_password"
 fi
 
+# TURN server
+if [ ! -f "$SECRETS_DIR/turn_password" ] || [ "${FORCE:-0}" = "1" ]; then
+  rand_base64 32 > "$SECRETS_DIR/turn_password"
+  echo "  ✓ turn_password"
+fi
+
 # CORS origins — must be set manually to your real domain
 if [ ! -f "$SECRETS_DIR/cors_origins" ]; then
   echo "https://your-domain.com" > "$SECRETS_DIR/cors_origins"
