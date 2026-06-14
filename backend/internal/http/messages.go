@@ -1,14 +1,10 @@
 package http
 
 import (
-	"context"
-	"encoding/base64"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +12,7 @@ import (
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/crypto"
 	"corp-messenger/backend/internal/models"
+	"corp-messenger/backend/internal/services"
 	"corp-messenger/backend/internal/websocket"
 
 	"github.com/go-chi/chi/v5"
@@ -53,7 +50,19 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit request body to 1MB to prevent DoS
+	membersInter := r.Context().Value(ChatMembersKey)
+	var members []*models.ChatMember
+	if membersInter != nil {
+		members = membersInter.([]*models.ChatMember)
+	} else {
+		members, err = h.storage.GetChatMembers(r.Context(), chatID)
+		if err != nil {
+			h.logger.Error("failed to get chat members fallback", "error", err)
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
+			return
+		}
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
 	var req SendMessageRequest
 	if err := decodeJSON(r.Body, &req); err != nil {
@@ -64,346 +73,38 @@ func (h *Handler) sendMessage(w http.ResponseWriter, r *http.Request) {
 
 	trimmedContent := strings.TrimSpace(req.Content)
 	if trimmedContent == "" && req.EncryptedContent == "" {
-		WriteErrorCode(w, http.StatusBadRequest, "missing_content", "Message content is required (cannot be empty or only whitespace)")
+		WriteErrorCode(w, http.StatusBadRequest, "missing_content", "Message content is required")
 		return
 	}
 	req.Content = trimmedContent
 
-	members, err := h.storage.GetChatMembers(r.Context(), chatID)
-	if err != nil {
-		h.logger.Error("failed to get chat members", "error", err)
-		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to get chat members")
-		return
-	}
-
-	isMember := false
-	for _, m := range members {
-		if m.UserID == claims.UserID {
-			isMember = true
-			break
-		}
-	}
-	if !isMember {
-		WriteErrorCode(w, http.StatusForbidden, "forbidden", "You are not a member of this chat")
-		return
-	}
-
-	// Check if sender is blocked by any chat member
-	for _, m := range members {
-		if m.UserID != claims.UserID {
-			blocked, err := h.storage.IsUserBlocked(r.Context(), m.UserID, claims.UserID)
-			if err != nil {
-				h.logger.Error("failed to check blocking status", "error", err)
-				WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check blocking status")
-				return
-			}
-			if blocked {
-				WriteErrorCode(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
-				return
-			}
-		}
-	}
-
-	msgType := req.Type
-	if msgType == "" {
-		msgType = models.MessageTypeText
-	}
-
-	// Validate message type
-	validTypes := map[string]bool{
-		models.MessageTypeText:  true,
-		models.MessageTypeImage: true,
-		models.MessageTypeFile:  true,
-		models.MessageTypeVoice: true,
-		models.MessageTypeVideo: true,
-	}
-	if !validTypes[msgType] {
-		WriteErrorCode(w, http.StatusBadRequest, "invalid_type", "Invalid message type")
-		return
-	}
-
-	// Validate message content size (prevent DoS)
-	const maxMessageContentSize = 10000 // 10KB
-	if len(req.Content) > maxMessageContentSize {
-		WriteErrorCode(w, http.StatusBadRequest, "content_too_large", "Message content exceeds maximum size (10KB)")
-		return
-	}
-
-	// Validate encrypted keys size (prevent DoS)
-	if len(req.EncryptedKeys) > 100 {
-		WriteErrorCode(w, http.StatusBadRequest, "too_many_keys", "Too many encrypted keys (max 100)")
-		return
-	}
-	for userID, key := range req.EncryptedKeys {
-		if _, err := uuid.Parse(userID); err != nil {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_user_id", "Invalid user ID in encrypted keys")
-			return
-		}
-		if len(key) > 10000 {
-			WriteErrorCode(w, http.StatusBadRequest, "key_too_large", "Encrypted key exceeds maximum size (10KB)")
-			return
-		}
-	}
-
-	// Validate duration if provided
-	if req.Duration != nil {
-		if *req.Duration < 0 || *req.Duration > 3600 {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_duration", "Duration must be between 0 and 3600 seconds (1 hour)")
-			return
-		}
-	}
-
-	// NOTE: Scheduled message processing is not yet implemented.
-	// The ScheduledAt field is reserved for future use but currently ignored.
-	// When implemented, a background worker will be needed to process scheduled messages.
-
-	// Validate location if provided
-	if req.Location != nil {
-		if req.Location.Latitude < -90 || req.Location.Latitude > 90 {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_latitude", "Latitude must be between -90 and 90")
-			return
-		}
-		if req.Location.Longitude < -180 || req.Location.Longitude > 180 {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_longitude", "Longitude must be between -180 and 180")
-			return
-		}
-		if len(req.Location.Address) > 500 {
-			WriteErrorCode(w, http.StatusBadRequest, "address_too_large", "Address exceeds maximum size (500 characters)")
-			return
-		}
-	}
-
-	if req.EncryptedContent != "" {
-		// Validate encrypted content is not empty after trimming
-		trimmedEncrypted := strings.TrimSpace(req.EncryptedContent)
-		if trimmedEncrypted == "" {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_encrypted_content", "Encrypted content cannot be empty")
-			return
-		}
-		req.EncryptedContent = trimmedEncrypted
-
-		// Validate encrypted content size (prevent DoS)
-		const maxEncryptedContentSize = 1024 * 1024 // 1MB
-		if len(req.EncryptedContent) > maxEncryptedContentSize {
-			WriteErrorCode(w, http.StatusBadRequest, "encrypted_content_too_large", "Encrypted content exceeds maximum size (1MB)")
-			return
-		}
-
-		// Validate IV is provided when encrypted content is present
-		if req.IV == "" {
-			WriteErrorCode(w, http.StatusBadRequest, "missing_iv", "IV (Initialization Vector) is required when using encrypted content")
-			return
-		}
-
-		// Validate IV is valid base64
-		decodedIV, err := base64.StdEncoding.DecodeString(req.IV)
-		if err != nil {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_iv", "IV must be valid base64")
-			return
-		}
-
-		// IV should be 12 or 16 bytes for AES-GCM (common sizes)
-		if len(decodedIV) != 12 && len(decodedIV) != 16 {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_iv_length", "IV must be 12 or 16 bytes (AES-GCM)")
-			return
-		}
-	}
-
-	msg := &models.Message{
+	input := services.SendMessageInput{
 		ChatID:           chatID,
 		SenderID:         claims.UserID,
-		Type:             msgType,
+		Type:             req.Type,
 		Content:          req.Content,
 		EncryptedContent: req.EncryptedContent,
 		EncryptedKeys:    req.EncryptedKeys,
+		IV:               req.IV,
 		Location:         req.Location,
 		ScheduledAt:      req.ScheduledAt,
 		Duration:         req.Duration,
+		ReplyTo:          req.ReplyTo,
 	}
 
-	if req.ReplyTo != "" {
-		replyToID, err := uuid.Parse(req.ReplyTo)
-		if err != nil {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_reply_to", "Invalid reply_to message ID")
+	msg, err := h.messageService.SendMessage(r.Context(), input, members)
+	if err != nil {
+		h.logger.Error("failed to send message via service", "error", err)
+		if err == services.ErrBlocked {
+			WriteErrorCode(w, http.StatusForbidden, "blocked", "You are blocked by a member of this chat")
 			return
 		}
-		// Verify the replied-to message exists in the same chat
-		replyMsg, err := h.storage.GetMessageByID(r.Context(), replyToID)
-		if err != nil {
-			h.logger.Error("failed to get reply message", "error", err)
-			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate reply_to")
+		if err == services.ErrInvalidType || err == services.ErrContentTooLarge || err == services.ErrInvalidLocation || err == services.ErrInvalidReply {
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_input", err.Error())
 			return
 		}
-		if replyMsg == nil {
-			WriteErrorCode(w, http.StatusBadRequest, "reply_not_found", "Reply-to message not found")
-			return
-		}
-		if replyMsg.ChatID != chatID {
-			WriteErrorCode(w, http.StatusBadRequest, "reply_wrong_chat", "Reply-to message is not in this chat")
-			return
-		}
-		msg.ReplyTo = &replyToID
-		// Set reply content for real-time display
-		msg.ReplyToContent = &replyMsg.Content
-		// Get sender name for reply
-		replySender, err := h.storage.GetUserByID(r.Context(), replyMsg.SenderID)
-		if err == nil && replySender != nil {
-			senderName := fmt.Sprintf("%s %s", replySender.FirstName, replySender.LastName)
-			msg.ReplyToSenderName = &senderName
-		}
-	}
-
-	// Handle thread_id for message threads
-	if req.ThreadID != "" {
-		threadID, err := uuid.Parse(req.ThreadID)
-		if err != nil {
-			WriteErrorCode(w, http.StatusBadRequest, "invalid_thread_id", "Invalid thread_id")
-			return
-		}
-		// Verify the thread message exists
-		threadMsg, err := h.storage.GetMessageByID(r.Context(), threadID)
-		if err != nil {
-			h.logger.Error("failed to get thread message", "error", err)
-			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
-			return
-		}
-		if threadMsg == nil {
-			WriteErrorCode(w, http.StatusBadRequest, "thread_not_found", "Thread message not found")
-			return
-		}
-		// Verify user is a member of the chat where the thread exists
-		member, err := h.storage.GetChatMember(r.Context(), threadMsg.ChatID, claims.UserID)
-		if err != nil {
-			h.logger.Error("failed to check chat membership", "error", err)
-			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to validate thread_id")
-			return
-		}
-		if member == nil {
-			WriteErrorCode(w, http.StatusForbidden, "not_in_chat", "You don't have access to this thread")
-			return
-		}
-		msg.ThreadID = &threadID
-	}
-
-	if err := h.storage.CreateMessage(r.Context(), msg); err != nil {
-		h.logger.Error("failed to create message", "error", err)
 		WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to send message")
 		return
-	}
-
-	// Parse @username mentions and create mention records
-	if req.Content != "" {
-		mentionRegex := regexp.MustCompile(`@(\w{3,50})`)
-		matches := mentionRegex.FindAllStringSubmatch(req.Content, -1)
-		seen := make(map[string]bool)
-		for _, match := range matches {
-			username := match[1]
-			if seen[username] {
-				continue
-			}
-			seen[username] = true
-			mentionedUser, err := h.storage.GetUserByUsername(r.Context(), username)
-			if err != nil {
-				h.logger.Error("failed to lookup mentioned user", "username", username, "error", err)
-				continue
-			}
-			if mentionedUser != nil {
-				if err := h.storage.AddMention(r.Context(), msg.ID, mentionedUser.ID); err != nil {
-					h.logger.Error("failed to add mention", "error", err)
-				}
-			}
-		}
-	}
-
-	// Broadcast message via WebSocket for realtime delivery
-	if h.hub != nil {
-		h.hub.BroadcastToChat(&websocket.BroadcastMessage{
-			Type:   websocket.EventNewMessage,
-			ChatID: chatID,
-			Payload: websocket.MessagePayload{
-				ID:                msg.ID,
-				ChatID:            msg.ChatID,
-				SenderID:          msg.SenderID,
-				Type:              msg.Type,
-				Content:           msg.Content,
-				CreatedAt:         msg.CreatedAt,
-				ReplyTo:           msg.ReplyTo,
-				ReplyToContent:    msg.ReplyToContent,
-				ReplyToSenderName: msg.ReplyToSenderName,
-			},
-			ExcludeSender: &claims.UserID,
-		})
-
-		// Broadcast chat list update to all members (including sender for chat list sync)
-		for _, member := range members {
-			h.logger.Info("Broadcasting chat_updated to user", "user_id", member.UserID, "chat_id", chatID)
-			h.hub.BroadcastToUser(member.UserID, &websocket.BroadcastMessage{
-				Type:   "chat_updated",
-				ChatID: chatID,
-				Payload: map[string]interface{}{
-					"chat_id": chatID,
-					"last_message": map[string]interface{}{
-						"id":         msg.ID,
-						"content":    msg.Content,
-						"sender_id":  msg.SenderID,
-						"type":       msg.Type,
-						"created_at": msg.CreatedAt,
-					},
-					"updated_at": msg.CreatedAt,
-				},
-			})
-		}
-	}
-
-	// Sync message to XMPP if hybrid mode is enabled
-	if h.syncService != nil {
-		senderJID := claims.UserID.String()
-		go func() {
-			// Panic recovery to ensure goroutine always terminates
-			defer func() {
-				if r := recover(); r != nil {
-					h.logger.Error("panic in XMPP sync goroutine", "recover", r)
-				}
-			}()
-
-			// Use background context with timeout to prevent goroutine accumulation
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := h.syncService.SyncMessageToXMPP(ctx, msg, senderJID); err != nil {
-				h.logger.Error("failed to sync message to XMPP", "error", err)
-			}
-		}()
-	}
-
-	// Send push notifications to offline users
-	if h.notificationSvc != nil {
-		h.logger.Info("Sending notifications for message", "message_id", msg.ID, "chat_id", msg.ChatID)
-		// Capture values to avoid data race with request scope
-		senderID := claims.UserID
-		msgCopy := *msg // Copy message to avoid race with potential future modifications
-		go func(userID uuid.UUID, msg models.Message) {
-			// Panic recovery to ensure goroutine always terminates
-			defer func() {
-				if r := recover(); r != nil {
-					h.logger.Error("panic in notification goroutine", "recover", r)
-				}
-			}()
-
-			// Use background context with timeout to avoid request cancellation
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			// Get sender name for notification
-			sender, _ := h.storage.GetUserByID(ctx, userID)
-			senderName := "Кто-то"
-			if sender != nil {
-				senderName = sender.FirstName + " " + sender.LastName
-			}
-			h.logger.Info("Calling notifyMessageReceived", "sender_name", senderName)
-			h.notifyMessageReceived(ctx, &msgCopy, senderName)
-		}(senderID, msgCopy)
-	} else {
-		h.logger.Warn("Notification service is nil, skipping notifications")
 	}
 
 	WriteJSON(w, http.StatusCreated, msg)

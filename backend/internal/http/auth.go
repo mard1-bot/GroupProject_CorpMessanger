@@ -3,12 +3,9 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/mail"
 	"strings"
 	"time"
-	"unicode"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
@@ -17,53 +14,6 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// isValidEmail uses net/mail for RFC-compliant validation
-func isValidEmail(email string) bool {
-	addr, err := mail.ParseAddress(email)
-	return err == nil && addr.Address == email
-}
-
-// validatePassword checks password strength requirements
-func validatePassword(password string) error {
-	if len(password) < 8 {
-		return fmt.Errorf("password must be at least 8 characters long")
-	}
-
-	// Check for common passwords (top 100 most common)
-	commonPasswords := map[string]bool{
-		"password": true, "123456": true, "12345678": true, "qwerty": true,
-		"abc123": true, "password123": true, "admin": true, "welcome": true,
-		"monkey": true, "letmein": true, "dragon": true, "master": true,
-		"hello": true, "login": true, "football": true, "iloveyou": true,
-		"princess": true, "starwars": true, "123123": true, "password1": true,
-		"123qwe": true, "qwerty123": true, "1q2w3e4r": true, "baseball": true,
-		"superman": true, "whatever": true, "trustno1": true, "michael": true,
-	}
-	lowerPassword := strings.ToLower(password)
-	if commonPasswords[lowerPassword] {
-		return fmt.Errorf("password is too common, please choose a stronger password")
-	}
-
-	hasUpper := false
-	hasLower := false
-	hasDigit := false
-	for _, ch := range password {
-		switch {
-		case unicode.IsUpper(ch):
-			hasUpper = true
-		case unicode.IsLower(ch):
-			hasLower = true
-		case unicode.IsDigit(ch):
-			hasDigit = true
-		}
-	}
-	if !hasUpper || !hasLower || !hasDigit {
-		return fmt.Errorf("password must contain at least one uppercase letter, one lowercase letter, and one digit")
-	}
-
-	return nil
-}
 
 type RegisterRequest struct {
 	Email      string `json:"email"`
@@ -397,8 +347,12 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate new password strength
-	if err := validatePassword(req.NewPassword); err != nil {
-		WriteErrorCode(w, http.StatusBadRequest, "password_too_weak", err.Error())
+	if err := ValidatePassword(req.NewPassword); err != nil {
+		if validationErr, ok := err.(*ValidationError); ok {
+			WriteError(w, ErrInvalidInput, validationErr.Message)
+		} else {
+			WriteError(w, ErrInvalidInput, "Password does not meet requirements")
+		}
 		return
 	}
 

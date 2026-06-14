@@ -358,7 +358,7 @@ func (e testEjabberd) GetRoomMessages(uuid.UUID, int) ([]map[string]interface{},
 	return nil, nil
 }
 func TestHealth(t *testing.T) {
-	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "")
+	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "", "")
 	go hub.Run(context.Background())
 	lk := livekit.NewService("", "", "")
 	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk, "")
@@ -370,7 +370,7 @@ func TestHealth(t *testing.T) {
 	}
 }
 func TestReady(t *testing.T) {
-	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "")
+	hub := websocket.NewHub(testStorage{}, livekit.NewService("", "", ""), "", "")
 	go hub.Run(context.Background())
 	lk := livekit.NewService("", "", "")
 	h := NewHandler(slog.Default(), testStorage{}, testEjabberd{}, "test-secret", []string{"http://localhost:3000"}, 168*time.Hour, hub, nil, "http://localhost:8080", 20, 60, 10000, nil, "", "", "", lk, "")

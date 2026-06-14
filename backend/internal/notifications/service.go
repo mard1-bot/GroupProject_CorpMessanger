@@ -5,14 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/http"
-	"net/smtp"
 	"os"
 	"strconv"
 	"time"
 
+	"corp-messenger/backend/internal/config"
+	"corp-messenger/backend/internal/email"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/storage"
 
@@ -25,10 +25,7 @@ type Service struct {
 	storage         storage.Storage
 	fcm             *FCMClientV1
 	expoPush        *ExpoPushClient
-	smtpHost        string
-	smtpPort        int
-	smtpUser        string
-	smtpPass        string
+	emailService    *email.Service
 	vapidPublicKey  string
 	vapidPrivateKey string
 }
@@ -64,8 +61,18 @@ func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) 
 	}
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPass := os.Getenv("SMTP_PASSWORD")
+	smtpFrom := os.Getenv("SMTP_FROM")
 
+	var emailService *email.Service
 	if smtpHost != "" && smtpUser != "" {
+		cfg := config.Config{
+			SMTPHost:     smtpHost,
+			SMTPPort:     smtpPort,
+			SMTPUser:     smtpUser,
+			SMTPPassword: smtpPass,
+			SMTPFrom:     smtpFrom,
+		}
+		emailService = email.NewService(cfg)
 		logger.Info("Email notifications configured", "host", smtpHost)
 	} else {
 		logger.Warn("Email notifications not configured")
@@ -86,10 +93,7 @@ func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) 
 		storage:         storage,
 		fcm:             fcm,
 		expoPush:        expoPush,
-		smtpHost:        smtpHost,
-		smtpPort:        smtpPort,
-		smtpUser:        smtpUser,
-		smtpPass:        smtpPass,
+		emailService:    emailService,
 		vapidPublicKey:  vapidPublicKey,
 		vapidPrivateKey: vapidPrivateKey,
 	}, nil
@@ -260,7 +264,7 @@ func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *No
 }
 
 func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
-	if s.smtpHost == "" || s.smtpUser == "" {
+	if s.emailService == nil {
 		return fmt.Errorf("email not configured")
 	}
 
@@ -269,31 +273,30 @@ func (s *Service) sendEmail(ctx context.Context, userID uuid.UUID, payload *Noti
 		return fmt.Errorf("get user: %w", err)
 	}
 
+	// Update user email from notification settings if set
 	settings, _ := s.storage.GetNotificationSettings(ctx, userID)
-	email := user.Email
 	if settings != nil && settings.Email != "" {
-		email = settings.Email
+		user.Email = settings.Email
 	}
 
-	// Sanitize user-controlled content to prevent HTML injection
-	safeTitle := html.EscapeString(payload.Title)
-	safeBody := html.EscapeString(payload.Body)
-
-	msg := []byte(fmt.Sprintf("To: %s\r\n"+
-		"Subject: [Corp Messenger] %s\r\n"+
-		"Content-Type: text/html; charset=UTF-8\r\n"+
-		"\r\n"+
-		"<html><body>\r\n"+
-		"<p><strong>%s</strong></p>\r\n"+
-		"<p>%s</p>\r\n"+
-		"<hr><p style='font-size:small;color:gray'>This is an automated notification from Corp Messenger.</p>\r\n"+
-		"</body></html>\r\n",
-		email, safeTitle, safeTitle, safeBody))
-
-	addr := fmt.Sprintf("%s:%d", s.smtpHost, s.smtpPort)
-	auth := smtp.PlainAuth("", s.smtpUser, s.smtpPass, s.smtpHost)
-
-	return smtp.SendMail(addr, auth, s.smtpUser, []string{email}, msg)
+	// Use email service for sending with HTML templates
+	// Determine notification type and call appropriate method
+	switch payload.Type {
+	case "mention":
+		senderName := payload.Data["sender_name"]
+		chatTitle := payload.Data["chat_title"]
+		messagePreview := payload.Body
+		return s.emailService.SendMentionNotification(user, senderName, chatTitle, messagePreview)
+	case "invite":
+		inviterName := payload.Data["inviter_name"]
+		chatTitle := payload.Data["chat_title"]
+		return s.emailService.SendInviteNotification(user, inviterName, chatTitle)
+	default: // "message"
+		senderName := payload.Data["sender_name"]
+		chatTitle := payload.Data["chat_title"]
+		messagePreview := payload.Body
+		return s.emailService.SendNewMessageNotification(user, senderName, chatTitle, messagePreview)
+	}
 }
 
 func (s *Service) isQuietHours(settings *models.NotificationSettings) bool {

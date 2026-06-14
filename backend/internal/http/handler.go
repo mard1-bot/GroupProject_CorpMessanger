@@ -2,7 +2,11 @@ package http
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	stdhttp "net/http"
@@ -20,6 +24,7 @@ import (
 	"corp-messenger/backend/internal/livekit"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/notifications"
+	"corp-messenger/backend/internal/services"
 	"corp-messenger/backend/internal/storage"
 	"corp-messenger/backend/internal/websocket"
 	"corp-messenger/backend/internal/xmppsync"
@@ -45,6 +50,8 @@ type Handler struct {
 	turnPassword    string
 	liveKit         *livekit.Service
 	rateLimiter     *RedisRateLimiter
+
+	messageService services.MessageService
 }
 
 // Rate limiting
@@ -62,18 +69,9 @@ var (
 	rateLimitRequests    = 20 // Default: 20 requests per window
 	rateLimitWindow      = 60 // Default: 60 seconds
 
-	// Failed login attempt tracking (in-memory - should use database in production)
-	loginAttempts     = make(map[string]*loginAttemptEntry)
-	loginAttemptsMux  sync.RWMutex
 	maxFailedAttempts = 5                // Lock account after 5 failed attempts
 	lockoutDuration   = 15 * time.Minute // Lock for 15 minutes
 )
-
-type loginAttemptEntry struct {
-	count       int
-	lastFailed  time.Time
-	lockedUntil time.Time
-}
 
 // StartRateLimitCleanup starts a background goroutine that periodically cleans up expired rate limit entries
 func StartRateLimitCleanup() {
@@ -139,7 +137,7 @@ func (h *Handler) isAccountLocked(ctx context.Context, email string) (bool, erro
 }
 
 // logAudit creates an audit log entry
-func (h *Handler) logAudit(ctx context.Context, userID uuid.UUID, action string, details map[string]interface{}) {
+func (h *Handler) logAudit(ctx context.Context, userID uuid.UUID, action, resource string, details map[string]interface{}) {
 	// Serialize details to JSON
 	detailsJSON := ""
 	if details != nil {
@@ -151,7 +149,7 @@ func (h *Handler) logAudit(ctx context.Context, userID uuid.UUID, action string,
 	log := &models.AuditLog{
 		UserID:   userID,
 		Action:   action,
-		Resource: "gdpr",
+		Resource: resource,
 		Details:  detailsJSON,
 	}
 
@@ -292,6 +290,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 		turnPassword:    turnPassword,
 		liveKit:         liveKit,
 		rateLimiter:     rateLimiter,
+		messageService:  services.NewMessageService(logger, storage, hub, notificationSvc, syncService),
 	}
 
 	r := chi.NewRouter()
@@ -366,22 +365,36 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 			r.Post("/chats", h.createChat)
 			r.Get("/chats", h.getUserChats)
-			// Chat-specific routes must be declared before generic /chats/{id} to avoid conflicts
-			r.Get("/chats/{id}/export", h.exportChat)
-			r.Post("/chats/{id}/avatar", h.uploadChatAvatar)
-			r.Get("/chats/{id}", h.getChatByID)
-			r.Put("/chats/{id}", h.updateChat)
-			r.Delete("/chats/{id}", h.deleteChat)
-			r.Post("/chats/{id}/members", h.addChatMember)
-			r.Delete("/chats/{id}/members/{userID}", h.removeChatMember)
-			r.Post("/chats/{id}/mute", h.muteChat)
-			r.Post("/chats/{id}/unmute", h.unmuteChat)
-			r.Post("/chats/{id}/pin", h.pinChat)
-			r.Post("/chats/{id}/unpin", h.unpinChat)
-			r.Post("/chats/{id}/archive", h.archiveChat)
-			r.Post("/chats/{id}/unarchive", h.unarchiveChat)
-			r.Delete("/chats/{id}/me", h.softDeleteChat)
-			r.Delete("/chats/{id}/history", h.clearChatHistory)
+			// Chat-specific routes using middleware to ensure user is a chat member
+			r.Route("/chats/{id}", func(r chi.Router) {
+				r.Use(RequireChatMemberMiddleware(h.storage, h.logger))
+
+				r.Get("/export", h.exportChat)
+				r.Post("/avatar", h.uploadChatAvatar)
+				r.Get("/", h.getChatByID)
+				r.Put("/", h.updateChat)
+				r.Delete("/", h.deleteChat)
+				r.Post("/members", h.addChatMember)
+				r.Delete("/members/{userID}", h.removeChatMember)
+				r.Post("/mute", h.muteChat)
+				r.Post("/unmute", h.unmuteChat)
+				r.Post("/pin", h.pinChat)
+				r.Post("/unpin", h.unpinChat)
+				r.Post("/archive", h.archiveChat)
+				r.Post("/unarchive", h.unarchiveChat)
+				r.Delete("/me", h.softDeleteChat)
+				r.Delete("/history", h.clearChatHistory)
+
+				r.Post("/messages", h.sendMessage)
+				r.Get("/messages", h.getChatMessages)
+				r.Get("/messages/search", h.searchMessages)
+				r.Put("/messages/{msgID}", h.editMessage)
+				r.Delete("/messages/{msgID}", h.deleteMessage)
+				r.Post("/messages/{msgID}/files", h.uploadFile)
+				r.Post("/messages/pin", h.pinMessage)
+				r.Post("/messages/unpin", h.unpinMessage)
+				r.Get("/messages/pinned", h.getPinnedMessages)
+			})
 
 			r.Post("/messages/{id}/reply", h.replyMessage)
 			r.Post("/messages/{id}/forward", h.forwardMessage)
@@ -393,16 +406,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 
 			r.Post("/typing", h.sendTypingIndicator)
 
-			r.Post("/chats/{id}/messages", h.sendMessage)
-			r.Get("/chats/{id}/messages", h.getChatMessages)
-			r.Get("/chats/{id}/messages/search", h.searchMessages)
 			r.Get("/messages/search", h.searchAllMessages)
-			r.Put("/chats/{id}/messages/{msgID}", h.editMessage)
-			r.Delete("/chats/{id}/messages/{msgID}", h.deleteMessage)
-			r.Post("/chats/{id}/messages/{msgID}/files", h.uploadFile)
-			r.Post("/chats/{id}/messages/pin", h.pinMessage)
-			r.Post("/chats/{id}/messages/unpin", h.unpinMessage)
-			r.Get("/chats/{id}/messages/pinned", h.getPinnedMessages)
 
 			// Notifications
 			r.Post("/devices/register", h.registerDevice)
@@ -535,9 +539,26 @@ func (h *Handler) getTurnConfig(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 			WriteErrorCode(w, stdhttp.StatusServiceUnavailable, "turn_misconfigured", "TURN server is not properly configured")
 			return
 		}
+		// Generate TURN REST API credentials
+		// turnPassword acts as the shared secret configured in coturn (static-auth-secret)
+		ttl := 24 * time.Hour
+		timestamp := time.Now().Add(ttl).Unix()
+
+		var userID string
+		if claims != nil {
+			userID = claims.UserID.String()
+		} else {
+			userID = "guest"
+		}
+
+		turnUser := fmt.Sprintf("%d:%s", timestamp, userID)
+		mac := hmac.New(sha1.New, []byte(h.turnPassword))
+		mac.Write([]byte(turnUser))
+		turnPass := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
 		config["turn_server_uri"] = h.turnServerURI
-		config["turn_username"] = h.turnUsername
-		config["turn_password"] = h.turnPassword
+		config["turn_username"] = turnUser
+		config["turn_password"] = turnPass
 	}
 
 	WriteJSON(w, stdhttp.StatusOK, map[string]interface{}{

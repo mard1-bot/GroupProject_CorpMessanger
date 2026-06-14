@@ -1531,7 +1531,7 @@ export default function ChatScreen() {
     ) : null;
 
     const wrappedContent = (
-      <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+      <View style={{ flexDirection: 'row', alignItems: 'flex-end', flexShrink: 1, maxWidth: '100%' }}>
         {isOwn && menuButton}
         <View {...(Platform.OS === 'web' && canDeleteMessage ? contextMenuProps : {})}>
           {bubbleContent}
@@ -2035,6 +2035,9 @@ const styles = StyleSheet.create({
   bubbleText: {
     fontSize: 16,
     lineHeight: 22,
+    ...Platform.select({
+      web: { wordBreak: 'break-word' as any },
+    }),
   },
   forwardedIndicator: {
     flexDirection: 'row',
@@ -2111,7 +2114,7 @@ const styles = StyleSheet.create({
   avatarColumn: { marginRight: 8 },
   avatarLarge: { width: 40, height: 40, borderRadius: 20 },
   avatarFallbackLarge: { width: 40, height: 40, borderRadius: 20, justifyContent: 'center', alignItems: 'center' },
-  messageContentColumn: { flexDirection: 'column' },
+  messageContentColumn: { flexDirection: 'column', flexShrink: 1, maxWidth: '100%' },
   senderNameAbove: { fontSize: 12, marginBottom: 4 },
   inputRow: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, paddingTop: 12, gap: 8 },
   input: {

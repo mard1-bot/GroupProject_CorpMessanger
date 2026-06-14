@@ -238,7 +238,7 @@ type UserConsent struct {
 	IPAddress      string    `json:"ip_address,omitempty" db:"ip_address"`
 	UserAgent      string    `json:"user_agent,omitempty" db:"user_agent"`
 	ConsentedAt    time.Time `json:"consented_at" db:"consented_at"`
-	RevokedAt      time.Time `json:"revoked_at,omitempty" db:"revoked_at"`
+	RevokedAt      *time.Time `json:"revoked_at,omitempty" db:"revoked_at"`
 	CreatedAt      time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
 }
@@ -250,9 +250,9 @@ type DataExportRequest struct {
 	RequestType string    `json:"request_type" db:"request_type"` // 'export' or 'delete'
 	Status      string    `json:"status" db:"status"`             // 'pending', 'processing', 'completed', 'failed'
 	RequestedAt time.Time `json:"requested_at" db:"requested_at"`
-	CompletedAt time.Time `json:"completed_at,omitempty" db:"completed_at"`
-	ExportURL   string    `json:"export_url,omitempty" db:"export_url"` // URL for downloading exported data
-	ExpiresAt   time.Time `json:"expires_at,omitempty" db:"expires_at"` // Export link expiration
+	CompletedAt *time.Time `json:"completed_at,omitempty" db:"completed_at"`
+	ExportURL   string     `json:"export_url,omitempty" db:"export_url"` // URL for downloading exported data
+	ExpiresAt   *time.Time `json:"expires_at,omitempty" db:"expires_at"` // Export link expiration
 	ErrorMsg    string    `json:"error_message,omitempty" db:"error_message"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`

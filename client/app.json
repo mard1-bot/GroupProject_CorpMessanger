@@ -10,12 +10,14 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.corpmessenger.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Для видеозвонков",
         "NSMicrophoneUsageDescription": "Для аудиозвонков"
       }
     },
     "android": {
+      "package": "com.corpmessenger.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -66,6 +68,13 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "68d9261c-a2f8-4156-b94a-afcd23b844b8"
+      }
+    },
+    "owner": "finchgram-project"
   }
 }

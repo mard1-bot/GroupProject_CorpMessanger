@@ -99,6 +99,20 @@ func ValidatePassword(password string) error {
 		return &ValidationError{Field: "password", Message: "Password must be less than 128 characters"}
 	}
 
+	// Check for common passwords (top most common)
+	commonPasswords := map[string]bool{
+		"password": true, "123456": true, "12345678": true, "qwerty": true,
+		"abc123": true, "password123": true, "admin": true, "welcome": true,
+		"monkey": true, "letmein": true, "dragon": true, "master": true,
+		"hello": true, "login": true, "football": true, "iloveyou": true,
+		"princess": true, "starwars": true, "123123": true, "password1": true,
+		"123qwe": true, "qwerty123": true, "1q2w3e4r": true, "baseball": true,
+		"superman": true, "whatever": true, "trustno1": true, "michael": true,
+	}
+	if commonPasswords[strings.ToLower(password)] {
+		return &ValidationError{Field: "password", Message: "Password is too common, please choose a stronger password"}
+	}
+
 	hasUpper := false
 	hasLower := false
 	hasDigit := false
@@ -181,10 +195,10 @@ func (e *ValidationError) Error() string {
 
 // ValidateJSONBody validates and decodes JSON body with size limits
 func ValidateJSONBody(r *http.Request, v interface{}, maxSize int64) error {
-	// Limit request body size
-	r.Body = http.MaxBytesReader(nil, r.Body, maxSize)
+	// Limit request body size using LimitReader (safe without ResponseWriter)
+	limitedReader := io.LimitReader(r.Body, maxSize+1) // +1 to detect overflow
 
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(limitedReader)
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(v); err != nil {
@@ -192,6 +206,12 @@ func ValidateJSONBody(r *http.Request, v interface{}, maxSize int64) error {
 			return &ValidationError{Field: "body", Message: "Request body too large"}
 		}
 		return &ValidationError{Field: "body", Message: "Invalid JSON format"}
+	}
+
+	// Check if there's more data (body exceeded maxSize)
+	extra := make([]byte, 1)
+	if n, _ := limitedReader.Read(extra); n > 0 {
+		return &ValidationError{Field: "body", Message: "Request body too large"}
 	}
 
 	return nil

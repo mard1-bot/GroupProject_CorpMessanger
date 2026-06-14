@@ -17,11 +17,11 @@ type ConsentRequest struct {
 
 // ConsentResponse represents consent status
 type ConsentResponse struct {
-	ConsentType    string    `json:"consent_type"`
-	ConsentGiven   bool      `json:"consent_given"`
-	ConsentVersion string    `json:"consent_version"`
-	ConsentedAt    time.Time `json:"consented_at,omitempty"`
-	RevokedAt      time.Time `json:"revoked_at,omitempty"`
+	ConsentType    string     `json:"consent_type"`
+	ConsentGiven   bool       `json:"consent_given"`
+	ConsentVersion string     `json:"consent_version"`
+	ConsentedAt    time.Time  `json:"consented_at,omitempty"`
+	RevokedAt      *time.Time `json:"revoked_at,omitempty"`
 }
 
 // DataExportRequest represents a request to export user data
@@ -31,13 +31,13 @@ type DataExportRequest struct {
 
 // DataExportResponse represents the status of a data export request
 type DataExportResponse struct {
-	ID          string    `json:"id"`
-	RequestType string    `json:"request_type"`
-	Status      string    `json:"status"`
-	RequestedAt time.Time `json:"requested_at"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
-	ExportURL   string    `json:"export_url,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	ID          string     `json:"id"`
+	RequestType string     `json:"request_type"`
+	Status      string     `json:"status"`
+	RequestedAt time.Time  `json:"requested_at"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	ExportURL   string     `json:"export_url,omitempty"`
+	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
 // giveConsent handles user consent submission
@@ -82,7 +82,8 @@ func (h *Handler) giveConsent(w http.ResponseWriter, r *http.Request) {
 	if req.ConsentGiven {
 		consent.ConsentedAt = time.Now()
 	} else {
-		consent.RevokedAt = time.Now()
+		now := time.Now()
+		consent.RevokedAt = &now
 	}
 
 	if err := h.storage.SaveUserConsent(r.Context(), consent); err != nil {
@@ -92,7 +93,7 @@ func (h *Handler) giveConsent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log audit event
-	h.logAudit(r.Context(), claims.UserID, "consent_updated", map[string]interface{}{
+	h.logAudit(r.Context(), claims.UserID, "consent_updated", "gdpr", map[string]interface{}{
 		"consent_type":  req.ConsentType,
 		"consent_given": req.ConsentGiven,
 		"ip_address":    clientIP,
@@ -183,7 +184,7 @@ func (h *Handler) requestDataExport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log audit event
-	h.logAudit(r.Context(), claims.UserID, "data_export_requested", map[string]interface{}{
+	h.logAudit(r.Context(), claims.UserID, "data_export_requested", "gdpr", map[string]interface{}{
 		"request_type": req.RequestType,
 		"request_id":   exportReq.ID.String(),
 	})
@@ -223,13 +224,13 @@ func (h *Handler) getDataExportStatus(w http.ResponseWriter, r *http.Request) {
 			RequestedAt: req.RequestedAt,
 		}
 
-		if !req.CompletedAt.IsZero() {
+		if req.CompletedAt != nil && !req.CompletedAt.IsZero() {
 			resp.CompletedAt = req.CompletedAt
 		}
 		if req.ExportURL != "" {
 			resp.ExportURL = req.ExportURL
 		}
-		if !req.ExpiresAt.IsZero() {
+		if req.ExpiresAt != nil && !req.ExpiresAt.IsZero() {
 			resp.ExpiresAt = req.ExpiresAt
 		}
 
@@ -287,7 +288,7 @@ func (h *Handler) deleteMyData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log deletion for compliance
-	h.logAudit(r.Context(), claims.UserID, "data_deleted", map[string]interface{}{
+	h.logAudit(r.Context(), claims.UserID, "data_deleted", "gdpr", map[string]interface{}{
 		"email":            user.Email,
 		"records_affected": recordsAffected,
 		"deletion_type":    "anonymization",

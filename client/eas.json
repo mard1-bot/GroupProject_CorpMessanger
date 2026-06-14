@@ -11,21 +11,13 @@
       }
     },
     "preview": {
-      "distribution": "internal",
-      "ios": {
-        "bundleIdentifier": "com.corpmessenger.app"
-      },
-      "android": {
-        "bundleIdentifier": "com.corpmessenger.app"
-      }
+      "distribution": "internal"
     },
     "production": {
       "ios": {
-        "bundleIdentifier": "com.corpmessenger.app",
         "autoIncrement": true
       },
       "android": {
-        "bundleIdentifier": "com.corpmessenger.app",
         "autoIncrement": true
       }
     }

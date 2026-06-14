@@ -136,6 +136,28 @@ services:
       - /tmp
       - /var/run/nginx
 
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile.prod
+    container_name: corp-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run/nginx
+
+  certbot:
+    image: certbot/certbot
+    container_name: corp-certbot
+    volumes:
+      - ./certs:/etc/letsencrypt
+      - ./data/certbot:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
   ejabberd:
     image: ejabberd/ecs:24.07
     container_name: corp-ejabberd

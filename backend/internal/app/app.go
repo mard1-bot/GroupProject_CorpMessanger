@@ -144,7 +144,7 @@ func New() (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create WebSocket hub
-	hub := websocket.NewHub(stg, lk, cfg.LiveKitURL)
+	hub := websocket.NewHub(stg, lk, cfg.LiveKitURL, cfg.RedisURL)
 	go hub.Run(ctx)
 
 	// Initialize notification service

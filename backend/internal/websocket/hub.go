@@ -7,8 +7,11 @@ import (
 	"corp-messenger/backend/internal/storage"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/google/uuid"
 )
@@ -50,6 +53,9 @@ type Hub struct {
 	// Storage for creating system messages
 	storage storage.Storage
 
+	// Structured logger
+	logger *slog.Logger
+
 	// LiveKit service for group calls
 	liveKit *livekit.Service
 
@@ -58,6 +64,7 @@ type Hub struct {
 
 	// Rate limiter for WebSocket messages
 	rateLimiter *RateLimiter
+	redisClient *redis.Client
 
 	mu         sync.RWMutex
 	shutdownMu sync.Mutex
@@ -70,11 +77,17 @@ type BroadcastMessage struct {
 	ChatID  uuid.UUID   `json:"chat_id"`
 	Payload interface{} `json:"payload"`
 	// Exclude sender from broadcast (optional)
-	ExcludeSender *uuid.UUID `json:"-"`
+	ExcludeSender *uuid.UUID `json:"exclude_sender,omitempty"`
+	TargetUserID  *uuid.UUID `json:"target_user_id,omitempty"`
 }
 
 // NewHub creates a new Hub instance.
-func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string) *Hub {
+func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string, redisURL string) *Hub {
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		opts = &redis.Options{Addr: "redis:6379"} // fallback
+	}
+	rdb := redis.NewClient(opts)
 	// Rate limit: 60 messages per minute with burst of 10
 	rateLimiter := NewRateLimiter(60, 10)
 
@@ -88,14 +101,17 @@ func NewHub(storage storage.Storage, liveKit *livekit.Service, liveKitURL string
 		typingState: make(map[uuid.UUID]map[uuid.UUID]*TypingState),
 		callManager: NewCallManager(),
 		storage:     storage,
+		logger:      slog.Default(),
 		liveKit:     liveKit,
 		liveKitURL:  liveKitURL,
 		rateLimiter: rateLimiter,
+		redisClient: rdb,
 	}
 }
 
 // Run starts the hub's main loop.
 func (h *Hub) Run(ctx context.Context) {
+	go h.listenRedis(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -127,6 +143,19 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Unlock()
 
 		case message := <-h.broadcast:
+			if message.TargetUserID != nil {
+				h.mu.RLock()
+				client, ok := h.userClients[*message.TargetUserID]
+				h.mu.RUnlock()
+				if ok {
+					select {
+					case client.send <- message:
+					default:
+					}
+				}
+				continue
+			}
+
 			h.mu.RLock()
 			room, ok := h.rooms[message.ChatID]
 			h.mu.RUnlock()
@@ -529,4 +558,25 @@ func (h *Hub) CreateCallSystemMessage(ctx context.Context, chatID, userID uuid.U
 
 	log.Printf("[Hub] Created call system message: %s in chat %s", eventType, chatID)
 	return nil
+}
+
+// listenRedis subscribes to Redis pub/sub for chat events and forwards them to the local broadcast channel
+func (h *Hub) listenRedis(ctx context.Context) {
+	pubsub := h.redisClient.Subscribe(ctx, "websocket_broadcast")
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-ch:
+			var broadcastMsg BroadcastMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &broadcastMsg); err == nil {
+				h.broadcast <- &broadcastMsg
+			} else {
+				h.logger.Error("failed to unmarshal redis broadcast message", "error", err)
+			}
+		}
+	}
 }
