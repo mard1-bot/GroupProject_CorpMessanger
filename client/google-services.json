@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "430684002950",
+    "project_id": "finchgram-corporate-messanger",
+    "storage_bucket": "finchgram-corporate-messanger.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:430684002950:android:e46ff3482025d4a00e4f07",
+        "android_client_info": {
+          "package_name": "com.finchgram.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9fCQbK-XspG6aBUgWAKGowMn1ygDRsqo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

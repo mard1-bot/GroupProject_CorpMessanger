@@ -1,0 +1,7 @@
+# Ignore non-client folders to prevent EAS EACCES permission denied errors
+data/
+.secrets/
+backend/
+coturn/
+nginx/
+scripts/
