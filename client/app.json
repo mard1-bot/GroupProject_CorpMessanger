@@ -10,14 +10,14 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.corpmessenger.app",
+      "bundleIdentifier": "com.finchgram.app",
       "infoPlist": {
         "NSCameraUsageDescription": "Для видеозвонков",
         "NSMicrophoneUsageDescription": "Для аудиозвонков"
       }
     },
     "android": {
-      "package": "com.corpmessenger.app",
+      "package": "com.finchgram.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
