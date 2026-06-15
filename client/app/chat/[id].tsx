@@ -1060,7 +1060,7 @@ export default function ChatScreen() {
         ));
       }
     }
-  }, [failedMessages, id, user]);
+  }, [failedMessages, id, user?.id]);
 
   // WebSocket connection
   useEffect(() => {

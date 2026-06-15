@@ -15,6 +15,10 @@ RUN npm ci
 # Copy the rest of the application code
 COPY . .
 
+# Pass the backend URL as a build argument so the web app connects to the real domain
+ARG EXPO_PUBLIC_BACKEND_URL
+ENV EXPO_PUBLIC_BACKEND_URL=$EXPO_PUBLIC_BACKEND_URL
+
 # Export the Expo app for web
 RUN npx expo export -p web
 

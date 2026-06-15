@@ -12,14 +12,27 @@ interface IncomingCallProps {
 }
 
 export function IncomingCall({ callState, callerName, isGroup, onAccept, onReject }: IncomingCallProps) {
-  const handleAcceptPress = () => {
+  const [isProcessing, setIsProcessing] = React.useState(false);
+  const handleAcceptPress = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
     console.log('Accept button pressed');
-    onAccept();
+    try {
+      await onAccept();
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const handleRejectPress = () => {
+  const handleRejectPress = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
     console.log('Reject button pressed');
-    onReject();
+    try {
+      await onReject();
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -40,20 +53,22 @@ export function IncomingCall({ callState, callerName, isGroup, onAccept, onRejec
             <TouchableOpacity 
               style={[styles.button, styles.rejectButton]}
               onPress={handleRejectPress}
+              disabled={isProcessing}
               activeOpacity={0.7}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <MaterialIcons name="call-end" size={32} color="#fff" />
+              <MaterialIcons name="call-end" size={32} color={isProcessing ? "#ccc" : "#fff"} />
               <Text style={styles.buttonText} numberOfLines={1}>Отклонить</Text>
             </TouchableOpacity>
 
             <TouchableOpacity 
               style={[styles.button, styles.acceptButton]}
               onPress={handleAcceptPress}
+              disabled={isProcessing}
               activeOpacity={0.7}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <MaterialIcons name="call" size={32} color="#fff" />
+              <MaterialIcons name="call" size={32} color={isProcessing ? "#ccc" : "#fff"} />
               <Text style={styles.buttonText} numberOfLines={1}>Ответить</Text>
             </TouchableOpacity>
           </View>

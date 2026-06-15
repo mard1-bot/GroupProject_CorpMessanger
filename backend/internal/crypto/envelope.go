@@ -20,6 +20,14 @@ var (
 func InitMasterKey() error {
 	keyStr := os.Getenv("ENCRYPTION_MASTER_KEY")
 	if keyStr == "" {
+		if filePath := os.Getenv("ENCRYPTION_MASTER_KEY_FILE"); filePath != "" {
+			content, err := os.ReadFile(filePath)
+			if err == nil {
+				keyStr = string(content)
+			}
+		}
+	}
+	if keyStr == "" {
 		return errors.New("ENCRYPTION_MASTER_KEY environment variable is required")
 	}
 

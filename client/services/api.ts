@@ -156,8 +156,8 @@ class ApiClient {
     const url = `${this.baseUrl}${path}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'X-Requested-With': 'XMLHttpRequest',
     };
-
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }

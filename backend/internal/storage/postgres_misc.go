@@ -184,6 +184,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		"032_gdpr_consent.sql",
 		"033_fix_schema_gaps.sql",
 		"034_ensure_all_columns.sql",
+		"035_add_username.sql",
 	}
 
 	for _, filename := range migrationFiles {

@@ -305,13 +305,17 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 				log.Printf("[WebRTC] Failed to generate callee token: %v", err)
 			}
 
-			liveKitRoom = &LiveKitRoomInfo{
-				RoomName:    roomName,
-				URL:         h.liveKitURL,
-				CallerToken: callerToken,
-				CalleeToken: calleeToken,
+			if callerToken != "" && calleeToken != "" {
+				liveKitRoom = &LiveKitRoomInfo{
+					RoomName:    roomName,
+					URL:         h.liveKitURL,
+					CallerToken: callerToken,
+					CalleeToken: calleeToken,
+				}
+				log.Printf("[WebRTC] LiveKit room created: %s", roomName)
+			} else {
+				log.Printf("[WebRTC] Failed to generate valid LiveKit tokens, falling back to P2P")
 			}
-			log.Printf("[WebRTC] LiveKit room created: %s", roomName)
 		}
 	}
 

@@ -42,6 +42,7 @@ export interface CallState {
   liveKitRoom?: string;
   liveKitURL?: string;
   liveKitToken?: string;
+  offerSdp?: string;
   participants?: any[];
 }
 
@@ -449,6 +450,17 @@ class WebCallService {
         this.pc = this.createPeerConnection();
       }
 
+      console.log(`[WebRTC] Signaling state before setup: ${this.pc.signalingState}`);
+
+      if (this.pc.signalingState === 'stable' && this.currentCall?.offerSdp) {
+        console.log('[WebRTC] Applying remote offer SDP before accepting');
+        await this.pc.setRemoteDescription(new RTCSessionDescription({
+          type: 'offer',
+          sdp: this.currentCall.offerSdp
+        }));
+        console.log(`[WebRTC] Signaling state after remote desc: ${this.pc.signalingState}`);
+      }
+
       if (!this.localStream) {
         console.log('[WebRTC] Getting local media stream');
         const isVideoCall = this.currentCall?.type === 'video';
@@ -537,11 +549,18 @@ class WebCallService {
     this.remoteStream?.getTracks().forEach(track => track.stop());
     this.remoteStreams.forEach(stream => stream.getTracks().forEach(track => track.stop()));
     this.remoteStreams.clear();
-    this.pc?.close();
-    
-    if (this.liveKitRoom) {
-      this.liveKitRoom.disconnect();
-      this.liveKitRoom = null;
+
+    try {
+      if (this.pc) {
+        this.pc.close();
+      }
+      
+      if (this.liveKitRoom) {
+        this.liveKitRoom.disconnect();
+        this.liveKitRoom = null;
+      }
+    } catch (e) {
+      console.error('[WebRTC] Error during cleanup:', e);
     }
 
     this.localStream = null;
@@ -554,6 +573,16 @@ class WebCallService {
   }
 
   private handleIncomingCall(payload: any) {
+    console.log('[WebRTC] handleIncomingCall payload:', {
+      callId: payload.call_id,
+      chatId: payload.chat_id,
+      type: payload.type,
+      hasSdp: !!payload.sdp,
+      sdpLength: payload.sdp?.length,
+      hasLivekit: !!payload.livekit,
+      livekit: payload.livekit
+    });
+
     this.currentCall = {
       callId: payload.call_id,
       chatId: payload.chat_id,
@@ -567,15 +596,15 @@ class WebCallService {
       liveKitRoom: payload.livekit?.room_name,
       liveKitURL: payload.livekit?.url,
       liveKitToken: payload.livekit?.token,
+      offerSdp: payload.sdp,
     };
 
     // If LiveKit info is available, we'll use it in acceptCall instead of peer-to-peer
     if (!payload.livekit) {
-      this.pc = this.createPeerConnection();
-      this.pc.setRemoteDescription(new RTCSessionDescription({
-        type: 'offer',
-        sdp: payload.sdp,
-      })).catch(err => console.error('Failed to set remote description:', err));
+      if (!this.pc) {
+        this.pc = this.createPeerConnection();
+      }
+      // We will apply the SDP in acceptCall to ensure it's fully awaited before createAnswer
     }
 
     this.notifyStateChange();
