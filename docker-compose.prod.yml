@@ -76,14 +76,14 @@ services:
       - "7880:7880"
       - "7881:7881"
       - "7882:7882/udp"
+    command: --redis-host redis:6379
     environment:
-      LIVEKIT_KEYS_FILE: /run/secrets/livekit_keys
+      LIVEKIT_KEYS: "devsecret: livekit-api-secret-change-in-production-min-32-chars"
       LIVEKIT_REDIS_ADDRESS: "redis:6379"
     depends_on:
       redis:
         condition: service_healthy
-    secrets:
-      - livekit_keys
+
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -183,6 +183,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      network: host
       args:
         GOPROXY: https://proxy.golang.org,direct
     container_name: corp-backend
@@ -203,6 +204,7 @@ services:
       - "8080"
     environment:
       APP_ENV: prod
+      BASE_URL: https://finchgram.ru
       HTTP_PORT: 8080
       HTTPS_PORT: 8443
       LOG_LEVEL: info
@@ -213,12 +215,13 @@ services:
       EJABBERD_USERNAME: admin
       EJABBERD_PASSWORD_FILE: /run/secrets/ejabberd_password
       EJABBERD_ADMIN_USER: admin@ejabberd
-      LIVEKIT_URL_FILE: /run/secrets/livekit_url
+      LIVEKIT_URL: http://livekit:7880
+      LIVEKIT_PUBLIC_URL_FILE: /run/secrets/livekit_url
       LIVEKIT_API_KEY_FILE: /run/secrets/livekit_api_key
       LIVEKIT_API_SECRET_FILE: /run/secrets/livekit_api_secret
       ENCRYPTION_MASTER_KEY_FILE: /run/secrets/encryption_master_key
       CORS_ORIGINS_FILE: /run/secrets/cors_origins
-      TLS_ENABLED: "true"
+      TLS_ENABLED: "false"
       TLS_CERT_PATH: /certs/server.crt
       TLS_KEY_PATH: /certs/server.key
       SCHEDULER_ENABLED: "true"

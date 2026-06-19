@@ -4,6 +4,7 @@ import (
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
 	"corp-messenger/backend/internal/websocket"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -104,6 +106,7 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 		MiddleName string `json:"middle_name,omitempty"`
 		Phone      string `json:"phone,omitempty"`
 		Avatar     string `json:"avatar,omitempty"`
+		Username   string `json:"username,omitempty"`
 	}
 
 	if err := decodeJSON(r.Body, &updates); err != nil {
@@ -118,6 +121,12 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	updates.MiddleName = strings.TrimSpace(updates.MiddleName)
 	updates.Phone = strings.TrimSpace(updates.Phone)
 	updates.Avatar = strings.TrimSpace(updates.Avatar)
+	updates.Username = strings.TrimSpace(updates.Username)
+
+	// Remove leading @ from username if present
+	if strings.HasPrefix(updates.Username, "@") {
+		updates.Username = updates.Username[1:]
+	}
 
 	// Validate input lengths
 	maxNameLength := 100
@@ -136,6 +145,18 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	if len(updates.Avatar) > 2048 {
 		WriteErrorCode(w, http.StatusBadRequest, "avatar_url_too_long", "Avatar URL is too long (max 2048 characters)")
 		return
+	}
+	if updates.Username != "" {
+		if len(updates.Username) < 3 || len(updates.Username) > 50 {
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_username", "Username must be between 3 and 50 characters")
+			return
+		}
+		// Allow alphanumeric and Russian letters and underscores
+		validUsername := regexp.MustCompile(`^[a-zA-Z0-9_а-яА-ЯёЁ]+$`)
+		if !validUsername.MatchString(updates.Username) {
+			WriteErrorCode(w, http.StatusBadRequest, "invalid_username", "Username can only contain letters, numbers, and underscores")
+			return
+		}
 	}
 
 	// Basic phone validation (if provided)
@@ -171,6 +192,20 @@ func (h *Handler) updateCurrentUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if updates.Avatar != "" {
 		user.Avatar = &updates.Avatar
+	}
+	if updates.Username != "" && (user.Username == nil || *user.Username != updates.Username) {
+		// Check uniqueness
+		existingUser, err := h.storage.GetUserByUsername(r.Context(), updates.Username)
+		if err != nil {
+			h.logger.Error("failed to check existing username", "error", err)
+			WriteErrorCode(w, http.StatusInternalServerError, "internal", "Failed to check username uniqueness")
+			return
+		}
+		if existingUser != nil && existingUser.ID != user.ID {
+			WriteErrorCode(w, http.StatusBadRequest, "username_taken", "Username is already taken")
+			return
+		}
+		user.Username = &updates.Username
 	}
 
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {
@@ -277,7 +312,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate unique filename with safe extension
+	// Generate unique filename with safe extension and timestamp to prevent caching
 	ext := filepath.Ext(header.Filename)
 	// Sanitize extension to only allow known image extensions
 	allowedExts := map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".webp": true}
@@ -286,7 +321,7 @@ func (h *Handler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 		// Default to .jpg if extension is invalid
 		ext = ".jpg"
 	}
-	filename := "avatar_" + claims.UserID.String() + ext
+	filename := fmt.Sprintf("avatar_%s_%d%s", claims.UserID.String(), time.Now().UnixMilli(), ext)
 	fullPath := filepath.Join(avatarsDir, filename)
 
 	// Delete old avatar if it exists

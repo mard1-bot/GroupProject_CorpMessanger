@@ -16,17 +16,7 @@ import { useThemeColor } from '@/hooks/use-theme-color';
 import { callService, type CallState, type CallType } from '@/services/calls';
 import { RemoteParticipant } from 'livekit-client';
 import { wsService } from '@/services/websocket';
-
-// Conditional import for RTCView (only on native platforms)
-let RTCView: any = null;
-if (Platform.OS !== 'web') {
-  try {
-    const webrtc = require('react-native-webrtc');
-    RTCView = webrtc.RTCView;
-  } catch (e) {
-    console.warn('react-native-webrtc not available');
-  }
-}
+import { RTCView } from './rtc-view';
 
 interface CallModalProps {
   visible: boolean;
@@ -177,29 +167,6 @@ export function CallModal({
     }
   }, [participants, isWeb]);
 
-  const handleStartCall = async () => {
-    if (!calleeId) {
-      console.error('No callee ID provided');
-      onClose();
-      return;
-    }
-
-    // Check WebSocket connection
-    if (!wsService.isConnected()) {
-      console.error('WebSocket not connected, cannot start call');
-      Alert.alert('Ошибка', 'Нет соединения с сервером. Попробуйте позже.');
-      onClose();
-      return;
-    }
-
-    try {
-      await callService.startCall(chatId, calleeId, callType);
-    } catch (error) {
-      console.error('Failed to start call:', error);
-      onClose();
-    }
-  };
-
   const handleEndCall = () => {
     callService.endCall();
     onClose();
@@ -215,20 +182,8 @@ export function CallModal({
     setIsVideoOff(!enabled);
   };
 
-  // Start call when modal opens
-  const callStartedRef = useRef(false);
-  useEffect(() => {
-    if (visible && !callState && !callStartedRef.current) {
-      callStartedRef.current = true;
-      handleStartCall();
-    }
-    if (!visible) {
-      callStartedRef.current = false;
-    }
-  }, [visible, callState, handleStartCall]);
-
-  const isConnecting = !callState?.isConnected && !callState?.isRinging;
-  const isIncoming = callState && !callState.isCaller && !callState.isConnected && !callState.isRinging;
+  const isConnecting = callState?.isCaller && !callState?.isConnected && !callState?.isRinging;
+  const isIncoming = callState && !callState.isCaller && !callState.isConnected;
   const isGroupCall = participants.size > 0 || callState?.liveKitRoom;
   const participantCount = participants.size + (remoteStream ? 1 : 0);
 

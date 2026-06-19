@@ -22,7 +22,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	dsn := "postgres://postgres:postgres@localhost:5432/corp_messenger?sslmode=disable"
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		// Default local development DSN
+		dsn = "postgres://postgres:postgres@localhost:5432/corp_messenger?sslmode=disable"
+	}
+	
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		fmt.Println("DB error:", err)
@@ -36,10 +41,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	_, err = db.Exec("UPDATE user_credentials SET password_hash = $1 WHERE user_id = '22222222-2222-2222-2222-222222222222'", string(hash))
+	// Find the admin user ID by email
+	var userID string
+	err = db.QueryRow("SELECT id FROM users WHERE email = 'admin@corpmessenger.com'").Scan(&userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			fmt.Println("Error: Default admin user (admin@corpmessenger.com) not found. Has the database been initialized?")
+		} else {
+			fmt.Println("Error finding admin user:", err)
+		}
+		os.Exit(1)
+	}
+
+	// Upsert the password into user_credentials
+	_, err = db.Exec(`
+		INSERT INTO user_credentials (user_id, password_hash) 
+		VALUES ($1, $2)
+		ON CONFLICT (user_id) 
+		DO UPDATE SET password_hash = EXCLUDED.password_hash
+	`, userID, string(hash))
+	
 	if err != nil {
 		fmt.Println("update error:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Admin password updated successfully")
+	fmt.Println("Admin password updated successfully for admin@corpmessenger.com")
 }

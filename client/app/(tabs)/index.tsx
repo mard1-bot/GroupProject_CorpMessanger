@@ -2,7 +2,7 @@ import { useRouter } from 'expo-router';
 import dayjs from 'dayjs';
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { FlatList, Pressable, StyleSheet, TextInput, View, ActivityIndicator, Platform, Alert, TouchableOpacity } from 'react-native';
+import { FlatList, Pressable, StyleSheet, TextInput, View, ActivityIndicator, Platform, Alert, TouchableOpacity, Image } from 'react-native';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -12,6 +12,7 @@ import { useThemeColor } from '@/hooks/use-theme-color';
 import { useAuth } from '@/contexts/auth-context';
 import { api } from '@/services/api';
 import { wsService, WS_EVENTS } from '@/services/websocket';
+import { getUserAvatarUrl, getAvatarUrl } from '@/utils/avatar';
 import type { Chat } from '@/types/chat';
 
 export default function ChatsScreen() {
@@ -368,7 +369,13 @@ export default function ChatsScreen() {
           } : {})}
           style={({ pressed }) => [styles.row, pressed && styles.rowPressed, isPinned && styles.rowPinned]}>
           <View style={[styles.avatar, { backgroundColor: primaryColor }]}>
-            <ThemedText style={styles.avatarText}>{initials}</ThemedText>
+            {(chat.type === 'direct' && other) ? (
+              <Image source={{ uri: getUserAvatarUrl(other, 50) }} style={{ width: 50, height: 50, borderRadius: 25 }} />
+            ) : (chat.avatar ? (
+              <Image source={{ uri: getAvatarUrl(chat.avatar) as string }} style={{ width: 50, height: 50, borderRadius: 25 }} />
+            ) : (
+              <ThemedText style={styles.avatarText}>{initials}</ThemedText>
+            ))}
           </View>
           <View style={styles.content}>
             <View style={styles.rowTop}>

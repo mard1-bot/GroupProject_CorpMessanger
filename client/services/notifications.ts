@@ -1,5 +1,6 @@
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { api } from './api';
 import { useAuth } from '@/contexts/auth-context';
 
@@ -52,8 +53,10 @@ class NotificationService {
         return;
       }
 
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
       const token = await Notifications.getExpoPushTokenAsync({
-        projectId: process.env.EXPO_PROJECT_ID || '',
+        projectId,
+        vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
       });
 
       this.token = token.data;

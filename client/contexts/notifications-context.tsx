@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import { api } from '@/services/api';
 
@@ -96,7 +97,11 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
       return null;
     }
 
-    const token = await Notifications.getExpoPushTokenAsync();
+    const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
+    const token = await Notifications.getExpoPushTokenAsync({
+      projectId,
+      vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
+    });
     return token.data;
   }
 

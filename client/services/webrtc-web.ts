@@ -67,16 +67,34 @@ class WebCallService {
 
   private setupWebSocketListeners() {
     wsService.onMessage((message) => {
+      const payload = message.payload;
       switch (message.type) {
         case 'call_offer':
-          if (this.currentCall?.isCaller && !this.currentCall?.callId && message.payload?.call_id) {
-            this.currentCall.callId = message.payload.call_id;
-            this.currentCall.callerId = message.payload.caller_id;
-            // Flush buffered ICE candidates now that we have the callId
-            this.flushPendingIceCandidates();
-            this.notifyStateChange();
+          if (this.currentCall?.isCaller) {
+            if (!this.currentCall?.callId && payload?.call_id) {
+              // This is our own offer being confirmed by the server
+              this.currentCall.callId = payload.call_id;
+              this.currentCall.callerId = payload.caller_id;
+              
+              if (payload.livekit) {
+                this.currentCall.liveKitRoom = payload.livekit.room_name;
+                this.currentCall.liveKitURL = payload.livekit.url;
+                this.currentCall.liveKitToken = payload.livekit.token;
+                
+                this.connectToLiveKitRoom(
+                  payload.livekit.room_name,
+                  payload.livekit.url,
+                  payload.livekit.token
+                ).catch(e => console.error('Failed to connect to LiveKit:', e));
+              }
+
+              this.flushPendingIceCandidates();
+              this.notifyStateChange();
+            }
+            // Ignore any reflected or duplicate call_offers if we are already the caller
           } else {
-            this.handleIncomingCall(message.payload);
+            // Incoming call
+            this.handleIncomingCall(payload);
           }
           break;
         case 'call_answer':

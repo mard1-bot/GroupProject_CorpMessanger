@@ -197,7 +197,7 @@ func (c *Client) writePump() {
 // handleMessage processes messages from the client.
 func (c *Client) handleMessage(msg *WSMessage) {
 	// Skip rate limiting for certain message types
-	skipRateLimit := msg.Type == "ping" || msg.Type == "pong"
+	skipRateLimit := msg.Type == "ping" || msg.Type == "pong" || msg.Type == "call_ice"
 
 	// Check rate limit for user actions
 	if !skipRateLimit && !c.hub.rateLimiter.Allow(c.UserID) {

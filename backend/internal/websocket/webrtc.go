@@ -221,14 +221,8 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	if callerInRoom {
 		_, callerInRoom = room[client]
 	}
-	// Verify callee is also in the chat room
-	calleeInRoom := false
-	for c := range room {
-		if c.UserID == offer.CalleeID {
-			calleeInRoom = true
-			break
-		}
-	}
+	// Verify callee is online (anywhere in the app)
+	calleeClient, calleeOnline := h.userClients[offer.CalleeID]
 	h.mu.RUnlock()
 
 	if !callerInRoom {
@@ -245,17 +239,17 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 		return
 	}
 
-	if !calleeInRoom {
+	if !calleeOnline {
 		h.sendToClient(client, &BroadcastMessage{
 			Type:   EventCallError,
 			ChatID: offer.ChatID,
 			Payload: map[string]interface{}{
 				"call_id": "",
-				"error":   "callee_not_in_chat",
-				"message": "Callee is not in this chat room",
+				"error":   "callee_not_in_chat", // Keeping same error code for client compatibility, but meaning is "callee offline"
+				"message": "Callee is offline or not reachable",
 			},
 		})
-		log.Printf("[WebRTC] Call offer rejected: callee %s is not in chat room %s", offer.CalleeID, offer.ChatID)
+		log.Printf("[WebRTC] Call offer rejected: callee %s is offline", offer.CalleeID)
 		return
 	}
 
@@ -321,7 +315,7 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 
 	// Find the callee client using userClients map
 	h.mu.RLock()
-	calleeClient := h.userClients[offer.CalleeID]
+	calleeClient = h.userClients[offer.CalleeID]
 	h.mu.RUnlock()
 
 	if calleeClient == nil {

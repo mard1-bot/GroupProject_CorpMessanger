@@ -35,12 +35,12 @@
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
+    "notification": {
+      "vapidPublicKey": "BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo"
+    },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png",
-      "notification": {
-        "vapidPublicKey": "BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo"
-      }
+      "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
       "expo-router",

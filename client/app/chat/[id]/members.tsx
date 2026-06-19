@@ -11,11 +11,7 @@ import { useAuth } from '@/contexts/auth-context';
 import { api, ChatMember } from '@/services/api';
 import md5 from 'md5';
 
-const getGravatarUrl = (email: string, size = 48) => {
-  const cleanEmail = (email || '').toLowerCase().trim();
-  const hash = cleanEmail ? md5(cleanEmail) : '00000000000000000000000000000000';
-  return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=mp`;
-};
+import { getUserAvatarUrl } from '@/utils/avatar';
 
 export default function ChatMembersScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -294,7 +290,7 @@ export default function ChatMembersScreen() {
     return (
       <View style={[styles.memberItem, { backgroundColor: surfaceColor }]}>
         <Image
-          source={{ uri: getGravatarUrl(memberUser.email, 48) }}
+          source={{ uri: getUserAvatarUrl(memberUser, 48) }}
           style={styles.avatar}
         />
         <View style={styles.memberInfo}>
@@ -396,7 +392,7 @@ export default function ChatMembersScreen() {
                         style={styles.userItem}
                         onPress={() => handleAddMember(u.id, `${u.first_name} ${u.last_name}`)}>
                         <Image
-                          source={{ uri: getGravatarUrl(u.email, 40) }}
+                          source={{ uri: getUserAvatarUrl(u, 40) }}
                           style={styles.userAvatar}
                         />
                         <View style={styles.userInfo}>

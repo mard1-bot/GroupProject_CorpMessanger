@@ -312,7 +312,7 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 	r.Get("/ws", h.handleWebSocket)
 
 	// Serve uploaded files — decrypt on-the-fly if encryption is enabled
-	r.Get("/uploads/{filename}", h.serveUploadedFile)
+	r.Get("/uploads/*", h.serveUploadedFile)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Auth endpoints with rate limiting
@@ -330,10 +330,11 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 			r.Get("/webrtc/turn", h.getTurnConfig)
 
 			r.Get("/users", h.getUsers)
-			r.Get("/users/{id}", h.getUserByID)
+			r.Put("/users/me", h.updateCurrentUser)
 			r.Put("/users/me/status", h.updateUserStatus)
 			r.Post("/users/me/avatar", h.uploadAvatar)
 			r.Get("/users/me/mentions", h.getUserMentions)
+			r.Get("/users/{id}", h.getUserByID)
 
 			// 2FA routes (admin only)
 			r.Route("/2fa", func(r chi.Router) {
@@ -437,21 +438,25 @@ func NewHandler(logger *slog.Logger, storage storage.Storage, ejabberd ejabberd.
 // serveUploadedFile serves files from the uploads directory, decrypting them
 // on-the-fly with AES-256-GCM when the master encryption key is available.
 func (h *Handler) serveUploadedFile(w stdhttp.ResponseWriter, r *stdhttp.Request) {
-	filename := chi.URLParam(r, "filename")
-	if filename == "" {
-		WriteErrorCode(w, stdhttp.StatusBadRequest, "invalid_request", "Filename is required")
+	routePath := chi.URLParam(r, "*")
+	if routePath == "" {
+		WriteErrorCode(w, stdhttp.StatusBadRequest, "invalid_request", "File path is required")
 		return
 	}
 	// Prevent path traversal
-	filename = filepath.Base(filename)
+	cleanPath := filepath.Clean(routePath)
+	if strings.Contains(cleanPath, "..") || strings.HasPrefix(cleanPath, "/") {
+		WriteErrorCode(w, stdhttp.StatusBadRequest, "invalid_request", "Invalid file path")
+		return
+	}
 
-	filePath := filepath.Join("./uploads", filename)
+	filePath := filepath.Join("./uploads", cleanPath)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			WriteErrorCode(w, stdhttp.StatusNotFound, "not_found", "File not found")
 		} else {
-			h.logger.Error("failed to read uploaded file", "error", err, "filename", filename)
+			h.logger.Error("failed to read uploaded file", "error", err, "filename", cleanPath)
 			WriteErrorCode(w, stdhttp.StatusInternalServerError, "internal", "Failed to read file")
 		}
 		return
@@ -467,7 +472,7 @@ func (h *Handler) serveUploadedFile(w stdhttp.ResponseWriter, r *stdhttp.Request
 		// serve the raw bytes so existing files remain accessible.
 	}
 
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(cleanPath), "."))
 	mimeTypes := map[string]string{
 		"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
 		"gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
@@ -480,7 +485,7 @@ func (h *Handler) serveUploadedFile(w stdhttp.ResponseWriter, r *stdhttp.Request
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", "inline; filename=\""+filename+"\"")
+	w.Header().Set("Content-Disposition", "inline; filename=\""+filepath.Base(cleanPath)+"\"")
 	w.Header().Set("Content-Length", strconv.Itoa(len(plaintext)))
 	w.WriteHeader(stdhttp.StatusOK)
 	w.Write(plaintext) //nolint:errcheck

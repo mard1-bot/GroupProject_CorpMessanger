@@ -35,18 +35,15 @@ import { MessageActionMenu } from '../../components/message-action-menu';
 import { ImagePreview } from '../../components/image-preview';
 import { api } from '@/services/api';
 import { wsService } from '@/services/websocket';
+import { callService } from '@/services/calls';
 import { Message, Chat, User } from '@/types/chat';
 import md5 from 'md5';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
+import * as ImagePicker from 'expo-image-picker';
 import dayjs from 'dayjs';
 
-// Gravatar helper with fallback
-const getGravatarUrl = (email: string, size = 48) => {
-  const cleanEmail = (email || '').toLowerCase().trim();
-  const hash = cleanEmail ? md5(cleanEmail) : '00000000000000000000000000000000';
-  return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=mp`; // 'mp' = mystery person fallback
-};
+import { getUserAvatarUrl } from '@/utils/avatar';
 
 type ListItem =
   | { type: 'date'; key: string; label: string }
@@ -84,6 +81,7 @@ export default function ChatScreen() {
   // Action menu state (for web)
   const [actionMenuVisible, setActionMenuVisible] = useState(false);
   const [messageMenuVisible, setMessageMenuVisible] = useState(false);
+  const [attachmentMenuVisible, setAttachmentMenuVisible] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [searchResults, setSearchResults] = useState<Message[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -97,7 +95,6 @@ export default function ChatScreen() {
   const isTypingActiveRef = useRef<boolean>(false);
 
   // Call state
-  const [callModalVisible, setCallModalVisible] = useState(false);
   const [callType, setCallType] = useState<'audio' | 'video'>('audio');
 
 // Failed messages queue for retry
@@ -400,28 +397,22 @@ export default function ChatScreen() {
     };
   }, [id, token]);
 
-  const handleAttachFile = async () => {
+  const handlePickDocument = async () => {
+    setAttachmentMenuVisible(false);
     try {
       if (Platform.OS === 'web') {
-        // Web: use file input
         const input = document.createElement('input');
         input.type = 'file';
-        input.accept = 'image/*,*/*';
+        input.accept = '*/*';
         input.onchange = async (e: any) => {
           const file = e.target.files[0];
           if (file) {
-            // Create preview URL for images
-            let previewUrl: string | null = null;
-            if (file.type.startsWith('image/')) {
-              previewUrl = URL.createObjectURL(file);
-            }
             setSelectedFile({ uri: file.name, name: file.name, type: file.type, file });
-            setSelectedFilePreview(previewUrl);
+            setSelectedFilePreview(null);
           }
         };
         input.click();
       } else {
-        // Native: use expo-document-picker
         const result = await DocumentPicker.getDocumentAsync({
           type: '*/*',
           copyToCacheDirectory: true,
@@ -429,28 +420,68 @@ export default function ChatScreen() {
         
         if (result.canceled === false && result.assets && result.assets.length > 0) {
           const asset = result.assets[0];
-          // Size limit: 50MB
           if (asset.size && asset.size > 50 * 1024 * 1024) {
             Alert.alert('Файл слишком большой', 'Максимальный размер файла 50MB');
             return;
-          }
-          // Use URI as preview for images
-          let previewUrl: string | null = null;
-          if (asset.mimeType && asset.mimeType.startsWith('image/')) {
-            previewUrl = asset.uri;
           }
           setSelectedFile({
             uri: asset.uri,
             name: asset.name,
             type: asset.mimeType || 'application/octet-stream',
           });
-          setSelectedFilePreview(previewUrl);
+          setSelectedFilePreview(null);
         }
       }
     } catch (error) {
       console.error('File picker error:', error);
-      Alert.alert('Ошибка', 'Не удалось выбрать файл');
     }
+  };
+
+  const handlePickImage = async (useCamera: boolean = false) => {
+    setAttachmentMenuVisible(false);
+    try {
+      if (Platform.OS === 'web' && useCamera) {
+        Alert.alert('Камера', 'Использование камеры доступно только в мобильном приложении');
+        return;
+      }
+      
+      const options: ImagePicker.ImagePickerOptions = {
+        mediaTypes: ImagePicker.MediaTypeOptions.All,
+        quality: 0.8,
+        allowsEditing: false,
+      };
+
+      const result = useCamera 
+        ? await ImagePicker.launchCameraAsync(options)
+        : await ImagePicker.launchImageLibraryAsync(options);
+
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        const asset = result.assets[0];
+        const filename = asset.fileName || asset.uri.split('/').pop() || 'media.jpg';
+        const type = asset.type === 'video' ? 'video/mp4' : 'image/jpeg';
+        
+        let fileBlob: Blob | undefined;
+        if (Platform.OS === 'web') {
+          // On web, fetch the local blob URI to convert it to a true Blob for upload
+          const res = await fetch(asset.uri);
+          fileBlob = await res.blob();
+        }
+
+        setSelectedFile({
+          uri: asset.uri,
+          name: filename,
+          type: asset.mimeType || type,
+          file: fileBlob,
+        });
+        setSelectedFilePreview(asset.uri);
+      }
+    } catch (error) {
+      console.error('Image picker error:', error);
+    }
+  };
+
+  const handleAttachFile = () => {
+    setAttachmentMenuVisible(true);
   };
 
   const isGroup = chat?.type === 'group';
@@ -722,8 +753,10 @@ export default function ChatScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {
-              setCallType('video');
-              setCallModalVisible(true);
+              const calleeId = other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '';
+              if (calleeId) {
+                callService.startCall(id as string, calleeId, 'video');
+              }
             }}
             style={styles.headerIconButton}
             hitSlop={8}>
@@ -731,8 +764,10 @@ export default function ChatScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {
-              setCallType('audio');
-              setCallModalVisible(true);
+              const calleeId = other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '';
+              if (calleeId) {
+                callService.startCall(id as string, calleeId, 'audio');
+              }
             }}
             style={styles.headerIconButton}
             hitSlop={8}>
@@ -898,11 +933,13 @@ export default function ChatScreen() {
 
     setInput('');
     const tempId = `temp-${Date.now()}`;
+    const msgType = hasFile ? (selectedFile.type.startsWith('image/') ? 'image' : selectedFile.type.startsWith('video/') ? 'video' : 'file') : 'text';
+
     const optimistic: Message = {
       id: tempId,
       chat_id: id,
       sender_id: user.id,
-      type: hasFile ? 'file' : 'text',
+      type: msgType,
       content: trimmed || '[Файл]',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -913,7 +950,7 @@ export default function ChatScreen() {
 
     try {
       // Send message first
-      const res = await api.sendMessage(id, trimmed || '[Файл]', hasFile ? 'file' : 'text', replyingTo?.id);
+      const res = await api.sendMessage(id, trimmed || '[Файл]', msgType, replyingTo?.id);
       if (!res.data) {
         throw new Error('Failed to send message');
       }
@@ -927,19 +964,7 @@ export default function ChatScreen() {
       
       // Upload file if selected
       if (hasFile && messageId && selectedFile) {
-        // For web, use the File object directly
-        // For mobile, fetch the file from uri
-        let fileBlob: Blob | File;
-        
-        if (Platform.OS === 'web' && selectedFile.file) {
-          fileBlob = selectedFile.file;
-        } else {
-          // Mobile: fetch file from local URI
-          const response = await fetch(selectedFile.uri);
-          fileBlob = await response.blob();
-        }
-        
-        const uploadRes = await api.uploadFile(id, messageId, fileBlob, selectedFile.name);
+        const uploadRes = await api.uploadFile(id, messageId, selectedFile);
         if (uploadRes.data) {
           // Update message with file info
           setMessages(prev => prev.map(m => 
@@ -1032,16 +1057,7 @@ export default function ChatScreen() {
         
         // Upload file if needed
         if (failedMsg.type === 'file' && failedMsg.file && res.data.id) {
-          let fileBlob: Blob | File;
-          
-          if (Platform.OS === 'web' && failedMsg.file.file) {
-            fileBlob = failedMsg.file.file;
-          } else {
-            const response = await fetch(failedMsg.file.uri);
-            fileBlob = await response.blob();
-          }
-          
-          const uploadRes = await api.uploadFile(id!, res.data.id, fileBlob, failedMsg.file.name);
+          const uploadRes = await api.uploadFile(id!, res.data.id, failedMsg.file);
           if (uploadRes.data) {
             setMessages(prev => prev.map(m => 
               m.id === res.data!.id ? { ...res.data!, file_url: uploadRes.data!.url, status: 'sent' } : m
@@ -1414,18 +1430,33 @@ export default function ChatScreen() {
 
     const bubbleChildren: React.ReactNode[] = [];
     if (msg.file_url) {
-      bubbleChildren.push(
-        <TouchableOpacity
-          key="file"
-          onPress={handleOpenFile}
-          style={[styles.fileAttachment, { backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.05)' }]}>
-          <MaterialIcons name="insert-drive-file" size={24} color={textColor} />
-          <ThemedText style={[styles.fileName, { color: textColor }]} numberOfLines={1}>
-            {msg.file_url.split('/').pop() || 'Файл'}
-          </ThemedText>
-          <MaterialIcons name="open-in-new" size={18} color={textColor} style={{ opacity: 0.7 }} />
-        </TouchableOpacity>
-      );
+      const url = api.getFileUrl(msg.file_url);
+      const isImage = msg.type === 'image' || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].some(ext => url.toLowerCase().endsWith(ext));
+      
+      if (isImage) {
+        bubbleChildren.push(
+          <TouchableOpacity key="image" onPress={handleOpenFile} style={styles.imageAttachmentContainer}>
+            <Image
+              source={{ uri: url }}
+              style={styles.imageAttachment}
+              resizeMode="cover"
+            />
+          </TouchableOpacity>
+        );
+      } else {
+        bubbleChildren.push(
+          <TouchableOpacity
+            key="file"
+            onPress={handleOpenFile}
+            style={[styles.fileAttachment, { backgroundColor: isOwn ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.05)' }]}>
+            <MaterialIcons name="insert-drive-file" size={24} color={textColor} />
+            <ThemedText style={[styles.fileName, { color: textColor }]} numberOfLines={1}>
+              {msg.file_url.split('/').pop() || 'Файл'}
+            </ThemedText>
+            <MaterialIcons name="open-in-new" size={18} color={textColor} style={{ opacity: 0.7 }} />
+          </TouchableOpacity>
+        );
+      }
     }
     if (msg.forwarded_sender_name) {
       bubbleChildren.push(
@@ -1545,9 +1576,9 @@ export default function ChatScreen() {
       return (
         <View style={styles.messageRowOtherGroup}>
           <View style={styles.avatarColumn}>
-            {sender.email ? (
+            {sender ? (
               <Image
-                source={{ uri: getGravatarUrl(sender.email, 40) }}
+                source={{ uri: getUserAvatarUrl(sender, 40) }}
                 style={styles.avatarLarge}
               />
             ) : (
@@ -1891,15 +1922,56 @@ export default function ChatScreen() {
         </Modal>
       )}
 
-      {/* Call Modal */}
-      <CallModal
-        visible={callModalVisible}
-        onClose={() => setCallModalVisible(false)}
-        chatId={id!}
-        calleeId={other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || ''}
-        calleeName={isGroup ? (chat?.title || 'Групповой звонок') : (other ? `${other.first_name} ${other.last_name}` : 'Пользователь')}
-        callType={callType}
-      />
+      {/* Attachment Menu Modal */}
+      {attachmentMenuVisible && (
+        <Modal
+          visible={true}
+          transparent={true}
+          animationType="fade"
+          onRequestClose={() => setAttachmentMenuVisible(false)}>
+          <TouchableOpacity
+            style={styles.actionMenuOverlay}
+            activeOpacity={1}
+            onPress={() => setAttachmentMenuVisible(false)}>
+            <ThemedView style={[
+              styles.actionMenuContent,
+              { 
+                position: 'absolute',
+                bottom: Platform.OS === 'web' ? 80 : insets.bottom + 80,
+                left: 16,
+                transform: undefined,
+                top: undefined,
+                right: undefined,
+                width: 200,
+              }
+            ]}>
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                onPress={() => handlePickImage(false)}>
+                <MaterialIcons name="photo-library" size={20} color={iconColor} />
+                <ThemedText style={styles.actionMenuText}>Галерея</ThemedText>
+              </TouchableOpacity>
+              
+              {Platform.OS !== 'web' && (
+                <TouchableOpacity
+                  style={styles.actionMenuItem}
+                  onPress={() => handlePickImage(true)}>
+                  <MaterialIcons name="photo-camera" size={20} color={iconColor} />
+                  <ThemedText style={styles.actionMenuText}>Камера</ThemedText>
+                </TouchableOpacity>
+              )}
+              
+              <TouchableOpacity
+                style={styles.actionMenuItem}
+                onPress={() => handlePickDocument()}>
+                <MaterialIcons name="insert-drive-file" size={20} color={iconColor} />
+                <ThemedText style={styles.actionMenuText}>Документ</ThemedText>
+              </TouchableOpacity>
+            </ThemedView>
+          </TouchableOpacity>
+        </Modal>
+      )}
+
 
       {/* Message Action Menu Modal */}
       <MessageActionMenu
@@ -2164,6 +2236,8 @@ const styles = StyleSheet.create({
   attachButton: { padding: 8, justifyContent: 'center', alignItems: 'center' },
   selectedFileRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 8, gap: 8 },
   fileAttachment: { flexDirection: 'row', alignItems: 'center', padding: 8, borderRadius: 8, marginBottom: 6, gap: 8 },
+  imageAttachmentContainer: { marginBottom: 6, borderRadius: 12, overflow: 'hidden' },
+  imageAttachment: { width: 200, height: 200, borderRadius: 12 },
   fileName: { flex: 1, fontSize: 14 },
   messageMenuButton: {
     padding: 4,

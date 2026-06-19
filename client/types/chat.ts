@@ -2,10 +2,10 @@ export type User = {
   id: string;
   email: string;
   name: string;
-  username: string;
+  username?: string;
   first_name: string;
   last_name: string;
-  avatarUrl?: string;
+  avatar?: string;
 };
 
 export type Chat = {

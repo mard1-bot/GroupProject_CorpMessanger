@@ -27,7 +27,7 @@ func ValidationMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Validate request size
-		if r.ContentLength > 10*1024*1024 { // 10MB limit
+		if r.ContentLength > 100*1024*1024 { // 100MB limit
 			WriteErrorCode(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request entity too large")
 			return
 		}

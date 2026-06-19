@@ -7,6 +7,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Platform,
+  Image,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,7 +16,8 @@ import { api } from '@/services/api';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { useThemeColor } from '@/hooks/use-theme-color';
-import { Ionicons } from '@expo/vector-icons';
+import { MaterialIcons, Ionicons } from '@expo/vector-icons';
+import { getUserAvatarUrl } from '@/utils/avatar';
 import { useDebounce } from '@/hooks/use-debounce';
 
 interface User {
@@ -136,7 +138,10 @@ export default function NewChatScreen() {
         onPress={() => toggleUserSelection(item)}
         style={[styles.userItem, { backgroundColor: selected ? primaryColor + '20' : surfaceColor }]}>
         <View style={[styles.avatar, { backgroundColor: primaryColor }]}>
-          <ThemedText style={styles.avatarText}>{getInitials(item)}</ThemedText>
+          <Image 
+            source={{ uri: getUserAvatarUrl(item, 40) }} 
+            style={{ width: 40, height: 40, borderRadius: 20 }} 
+          />
         </View>
         <View style={styles.userInfo}>
           <ThemedText style={[styles.userName, { color: textColor }]}>

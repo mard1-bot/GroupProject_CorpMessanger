@@ -2,7 +2,9 @@ package http
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"corp-messenger/backend/internal/auth"
 	"corp-messenger/backend/internal/models"
@@ -12,9 +14,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// AdminCreateUserRequest represents admin user creation
 type AdminCreateUserRequest struct {
 	Email      string `json:"email"`
+	Username   string `json:"username,omitempty"`
 	Password   string `json:"password"`
 	Phone      string `json:"phone,omitempty"`
 	FirstName  string `json:"first_name"`
@@ -24,9 +26,9 @@ type AdminCreateUserRequest struct {
 	Status     string `json:"status,omitempty"`
 }
 
-// AdminUpdateUserRequest represents admin user update
 type AdminUpdateUserRequest struct {
 	Email      string  `json:"email,omitempty"`
+	Username   *string `json:"username,omitempty"`
 	Phone      string  `json:"phone,omitempty"`
 	FirstName  string  `json:"first_name,omitempty"`
 	LastName   string  `json:"last_name,omitempty"`
@@ -183,6 +185,24 @@ func (h *Handler) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate and check username uniqueness
+	req.Username = strings.TrimSpace(req.Username)
+	if strings.HasPrefix(req.Username, "@") {
+		req.Username = req.Username[1:]
+	}
+	if req.Username != "" {
+		importRegexp := regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+		if len(req.Username) < 3 || len(req.Username) > 50 || !importRegexp.MatchString(req.Username) {
+			WriteError(w, ErrInvalidInput, "Username must be 3-50 characters long and contain only letters, numbers, and underscores")
+			return
+		}
+		existingUsername, err := h.storage.GetUserByUsername(r.Context(), req.Username)
+		if err == nil && existingUsername != nil {
+			WriteError(w, ErrConflict, "Username is already taken")
+			return
+		}
+	}
+
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -201,6 +221,9 @@ func (h *Handler) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MiddleName != "" {
 		user.MiddleName = &req.MiddleName
+	}
+	if req.Username != "" {
+		user.Username = &req.Username
 	}
 
 	if err := h.storage.CreateUser(r.Context(), user, string(hashedPassword)); err != nil {
@@ -263,13 +286,48 @@ func (h *Handler) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update fields
-	if req.Email != "" {
+	if req.Email != "" && req.Email != user.Email {
 		if !ValidateEmail(req.Email) {
 			WriteError(w, ErrInvalidInput, "Invalid email format")
 			return
 		}
+		// Check uniqueness
+		existing, _, err := h.storage.GetUserByEmail(r.Context(), req.Email)
+		if err == nil && existing != nil && existing.ID != user.ID {
+			WriteError(w, ErrConflict, "Email is already taken by another user")
+			return
+		}
 		user.Email = req.Email
 	}
+	
+	if req.Username != nil {
+		newUsername := strings.TrimSpace(*req.Username)
+		if strings.HasPrefix(newUsername, "@") {
+			newUsername = newUsername[1:]
+		}
+		if newUsername != "" {
+			importRegexp := regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+			if len(newUsername) < 3 || len(newUsername) > 50 || !importRegexp.MatchString(newUsername) {
+				WriteError(w, ErrInvalidInput, "Username must be 3-50 characters long and contain only letters, numbers, and underscores")
+				return
+			}
+			if user.Username == nil || *user.Username != newUsername {
+				// Check uniqueness
+				existingUsername, err := h.storage.GetUserByUsername(r.Context(), newUsername)
+				if err == nil && existingUsername != nil && existingUsername.ID != user.ID {
+					WriteError(w, ErrConflict, "Username is already taken")
+					return
+				}
+				user.Username = &newUsername
+			}
+		} else {
+			// If explicitly set to empty string, it might mean unset (but database requires UNIQUE index with WHERE IS NOT NULL)
+			// we can set it to nil or just not update it. Let's not allow removing username for now, or just set to nil
+			// actually we will let them pass empty string to unset it
+			user.Username = nil
+		}
+	}
+	
 	if req.Phone != "" {
 		user.Phone = req.Phone
 	}
@@ -280,7 +338,11 @@ func (h *Handler) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		user.LastName = req.LastName
 	}
 	if req.MiddleName != nil {
-		user.MiddleName = req.MiddleName
+		if *req.MiddleName == "" {
+			user.MiddleName = nil
+		} else {
+			user.MiddleName = req.MiddleName
+		}
 	}
 
 	if err := h.storage.UpdateUser(r.Context(), user); err != nil {

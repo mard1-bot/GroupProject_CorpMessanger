@@ -85,6 +85,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Periodically refresh user data to sync role changes
   useEffect(() => {
     if (!token) return;
+    
+    // Refresh immediately on mount to ensure we have the latest data (e.g. avatar)
+    refreshUser();
+    
     const interval = setInterval(() => {
       refreshUser();
     }, 30000); // every 30s

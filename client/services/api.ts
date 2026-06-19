@@ -274,6 +274,57 @@ class ApiClient {
     return this.request('PUT', '/api/v1/users/me', data);
   }
 
+  async uploadAvatar(
+    fileInfo: { uri?: string; name: string; type: string; file?: File | Blob }
+  ): Promise<ApiResponse<{ avatar_url: string }>> {
+    const formData = new FormData();
+    
+    if (Platform.OS === 'web' && fileInfo.file) {
+      formData.append('avatar', fileInfo.file, fileInfo.name);
+    } else if (fileInfo.uri) {
+      formData.append('avatar', {
+        uri: fileInfo.uri,
+        name: fileInfo.name,
+        type: fileInfo.type || 'application/octet-stream',
+      } as any);
+    } else {
+      throw new Error('No valid file or URI provided for upload');
+    }
+    
+    const url = `${this.baseUrl}/api/v1/users/me/avatar`;
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: formData,
+      });
+
+      if (!response.ok) {
+        return {
+          error: {
+            code: `http_${response.status}`,
+            message: response.statusText || 'Upload failed',
+          },
+        };
+      }
+
+      const data = await response.json();
+      return { data };
+    } catch (error) {
+      return {
+        error: {
+          code: 'network_error',
+          message: error instanceof Error ? error.message : 'Network error during upload',
+        },
+      };
+    }
+  }
+
   // Chats
   async createChat(data: {
     type: string;
@@ -369,11 +420,21 @@ class ApiClient {
   async uploadFile(
     chatId: string,
     messageId: string,
-    file: File | Blob,
-    filename: string,
+    fileInfo: { uri?: string; name: string; type: string; file?: File | Blob }
   ): Promise<ApiResponse<FileAttachment>> {
     const formData = new FormData();
-    formData.append('file', file, filename);
+    
+    if (Platform.OS === 'web' && fileInfo.file) {
+      formData.append('file', fileInfo.file, fileInfo.name);
+    } else if (fileInfo.uri) {
+      formData.append('file', {
+        uri: fileInfo.uri,
+        name: fileInfo.name,
+        type: fileInfo.type || 'application/octet-stream',
+      } as any);
+    } else {
+      throw new Error('No valid file or URI provided for upload');
+    }
     
     const url = `${this.baseUrl}/api/v1/chats/${chatId}/messages/${messageId}/files`;
     const headers: Record<string, string> = {};

@@ -44,6 +44,7 @@ type Config struct {
 	TLSKeyPath           string
 	DBSSLMode            string
 	LiveKitURL           string
+	LiveKitPublicURL     string
 	LiveKitAPIKey        string
 	LiveKitAPISecret     string
 	RedisURL             string
@@ -209,6 +210,10 @@ func Load() (Config, error) {
 
 	// Parse LiveKit configuration
 	cfg.LiveKitURL = optional("LIVEKIT_URL")
+	cfg.LiveKitPublicURL = optional("LIVEKIT_PUBLIC_URL")
+	if cfg.LiveKitPublicURL == "" {
+		cfg.LiveKitPublicURL = cfg.LiveKitURL // Fallback to internal URL if public is not specified
+	}
 	cfg.LiveKitAPIKey = optional("LIVEKIT_API_KEY")
 	cfg.LiveKitAPISecret = optional("LIVEKIT_API_SECRET")
 

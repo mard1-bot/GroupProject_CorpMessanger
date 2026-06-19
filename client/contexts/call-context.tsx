@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { callService, type CallState } from '@/services/calls';
-import { IncomingCall } from '@/components/incoming-call';
+import { CallModal } from '@/components/call-modal';
 import { api } from '@/services/api';
 
 interface CallContextType {
@@ -101,13 +101,19 @@ export function CallProvider({ children }: CallProviderProps) {
   return (
     <CallContext.Provider value={value}>
       {children}
-      {showIncomingCall && currentCall && (
-        <IncomingCall
-          callState={currentCall}
-          callerName={callerName}
-          isGroup={isGroupCall}
-          onAccept={handleAcceptCall}
-          onReject={handleRejectCall}
+      {currentCall && (
+        <CallModal
+          visible={true}
+          onClose={() => {
+            if (currentCall && !currentCall.isEnded) {
+              callService.endCall();
+            }
+            setShowIncomingCall(false);
+          }}
+          chatId={currentCall.chatId}
+          calleeId={currentCall.isCaller ? currentCall.calleeId : currentCall.callerId}
+          calleeName={callerName}
+          callType={currentCall.type}
         />
       )}
     </CallContext.Provider>

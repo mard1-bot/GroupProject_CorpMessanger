@@ -11,11 +11,7 @@ import { useAuth } from '@/contexts/auth-context';
 import { api } from '@/services/api';
 import md5 from 'md5';
 
-const getGravatarUrl = (email: string, size = 80) => {
-  const cleanEmail = (email || '').toLowerCase().trim();
-  const hash = cleanEmail ? md5(cleanEmail) : '00000000000000000000000000000000';
-  return `https://www.gravatar.com/avatar/${hash}?s=${size}&d=mp`;
-};
+import { getUserAvatarUrl } from '@/utils/avatar';
 
 export default function UserProfileScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -87,7 +83,7 @@ export default function UserProfileScreen() {
       <View style={[styles.header, { backgroundColor: surfaceColor }]}>
         <View style={[styles.avatarLarge, { backgroundColor: primaryColor }]}>
           <Image
-            source={{ uri: getGravatarUrl(userData.email, 80) }}
+            source={{ uri: getUserAvatarUrl(userData, 80) }}
             style={styles.avatarImage}
           />
         </View>
