@@ -23,6 +23,7 @@ export const WS_EVENTS = {
   CALL_END: 'call_end',
   CALL_REJECT: 'call_reject',
   CALL_ACCEPT: 'call_accept',
+  CALL_JOIN: 'call_join',
   CALL_BUSY: 'call_busy',
   CALL_RINGING: 'call_ringing',
 } as const;

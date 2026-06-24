@@ -35,18 +35,20 @@ export function CallModal({
   calleeName,
   callType,
 }: CallModalProps) {
-  const [callState, setCallState] = useState<CallState | null>(null);
+  const [callState, setCallState] = useState<CallState | null>(() => callService.getCurrentCall());
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(true);
   const [videoFallback, setVideoFallback] = useState(false);
   const [participants, setParticipants] = useState<Map<string, { participant: RemoteParticipant; stream: MediaStream }>>(new Map());
-  
+
+  const [isAccepting, setIsAccepting] = useState(false);
+
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const participantVideoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
-  
+
   const primaryColor = useThemeColor({}, 'primary');
   const textColor = useThemeColor({}, 'text');
   const bgColor = useThemeColor({}, 'background');
@@ -61,8 +63,8 @@ export function CallModal({
       if (state && callType === 'video' && state.type === 'audio') {
         setVideoFallback(true);
       }
-      if (state?.isEnded) {
-        setTimeout(onClose, 1500);
+      if (state?.isEnded || !state) {
+        setTimeout(onClose, 500);
       }
     });
 
@@ -137,7 +139,7 @@ export function CallModal({
       } else {
         console.log('[CallModal] Local video not set:', { hasRef: !!localVideoRef.current, hasStream: !!localStream });
       }
-      
+
       if (remoteVideoRef.current && remoteStream) {
         console.log('[CallModal] Setting remote video stream', {
           hasStream: !!remoteStream,
@@ -182,9 +184,24 @@ export function CallModal({
     setIsVideoOff(!enabled);
   };
 
+  const handleAcceptCall = async () => {
+    if (!callState) return;
+    try {
+      setIsAccepting(true);
+      if (callState.isGroup) {
+        await callService.joinCall(callState.callId, chatId);
+      } else {
+        await callService.acceptCall(callState.callId, chatId);
+      }
+    } catch (error) {
+      console.error('Failed to accept call:', error);
+      setIsAccepting(false);
+    }
+  };
+
   const isConnecting = callState?.isCaller && !callState?.isConnected && !callState?.isRinging;
   const isIncoming = callState && !callState.isCaller && !callState.isConnected;
-  const isGroupCall = participants.size > 0 || callState?.liveKitRoom;
+  const isGroupCall = !calleeId && (participants.size > 0 || callState?.liveKitRoom);
   const participantCount = participants.size + (remoteStream ? 1 : 0);
 
   return (
@@ -202,10 +219,10 @@ export function CallModal({
           </Text>
           <Text style={[styles.status, { color: '#888' }]}>
             {videoFallback ? 'Видео недоступно. Аудиозвонок...' :
-             isIncoming ? 'Входящий звонок...' :
-             isConnecting ? 'Соединение...' :
-             callState?.isRinging ? 'Звонит...' :
-             callState?.isConnected ? 'В разговоре' : 'Звонок завершен'}
+              isIncoming ? 'Входящий звонок...' :
+                isConnecting ? 'Соединение...' :
+                  callState?.isRinging ? 'Звонит...' :
+                    callState?.isConnected ? 'В разговоре' : 'Звонок завершен'}
           </Text>
         </View>
 
@@ -242,16 +259,11 @@ export function CallModal({
                     {stream ? (
                       isWeb ? (
                         <video
-                          ref={(el) => {
-                            if (el) {
-                              participantVideoRefs.current.set(identity, el);
-                              // Set srcObject immediately when element is created
-                              if (el.srcObject !== stream) {
-                                el.srcObject = stream;
-                                el.play().catch(err => console.error('Participant video play error:', identity, err));
-                              }
-                            }
-                          }}
+                        ref={(el) => {
+                          if (el) {
+                            participantVideoRefs.current.set(identity, el);
+                          }
+                        }}
                           style={styles.gridVideo}
                           autoPlay
                           playsInline
@@ -283,11 +295,6 @@ export function CallModal({
                     <video
                       ref={(el) => {
                         remoteVideoRef.current = el;
-                        if (el && el.srcObject !== remoteStream) {
-                          console.log('[CallModal] Setting remote video srcObject');
-                          el.srcObject = remoteStream;
-                          el.play().catch(err => console.error('Remote video play error:', err));
-                        }
                       }}
                       style={styles.remoteVideoWeb}
                       autoPlay
@@ -315,12 +322,6 @@ export function CallModal({
                       <video
                         ref={(el) => {
                           localVideoRef.current = el;
-                          if (el && el.srcObject !== localStream) {
-                            console.log('[CallModal] Setting local video srcObject');
-                            el.srcObject = localStream;
-                            el.muted = true;
-                            el.play().catch(err => console.error('Local video play error:', err));
-                          }
                         }}
                         style={styles.localVideoWeb}
                         autoPlay
@@ -367,10 +368,15 @@ export function CallModal({
               <MaterialIcons name="call-end" size={32} color="#fff" />
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.button, styles.acceptButton]}
-              onPress={() => callState && callService.acceptCall(callState.callId, chatId)}
+              style={[styles.button, styles.acceptButton, isAccepting && { opacity: 0.7 }]}
+              onPress={handleAcceptCall}
+              disabled={isAccepting}
             >
-              <MaterialIcons name="call" size={32} color="#fff" />
+              {isAccepting ? (
+                <ActivityIndicator color="#fff" size="large" />
+              ) : (
+                <MaterialIcons name="call" size={32} color="#fff" />
+              )}
             </TouchableOpacity>
           </View>
         ) : (

@@ -301,6 +301,8 @@ func (c *Client) handleMessage(msg *WSMessage) {
 		c.hub.HandleCallReject(c, msg.Payload)
 	case EventCallAccept:
 		c.hub.HandleCallAccept(c, msg.Payload)
+	case EventCallJoin:
+		c.hub.HandleCallJoin(c, msg.Payload)
 	case EventCallBusy:
 		c.hub.HandleCallBusy(c, msg.Payload)
 	}

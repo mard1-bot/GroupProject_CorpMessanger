@@ -15,13 +15,14 @@ export interface CallState {
   callId: string;
   chatId: string;
   callerId: string;
-  calleeId: string;
+  calleeId: string | null;
   type: CallType;
   isCaller: boolean;
   isConnected: boolean;
   isRinging: boolean;
   isEnded: boolean;
   error?: string;
+  offerSdp?: string;
 }
 
 class NativeCallService {
@@ -33,16 +34,12 @@ class NativeCallService {
   private onLocalStreamCallbacks: ((stream: MediaStream) => void)[] = [];
   private onRemoteStreamCallbacks: ((stream: MediaStream) => void)[] = [];
   private pendingIceCandidates: { candidate: string; sdp_mline_index: number | null; sdp_mid: string | null }[] = [];
+  private isAccepting: boolean = false;
+  private disconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
   private configuration = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      { urls: 'stun:stun.services.mozilla.com' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
     ],
   };
 
@@ -55,6 +52,12 @@ class NativeCallService {
     if (turnServerUri && turnUsername && turnPassword) {
       this.configuration.iceServers.push({
         urls: turnServerUri,
+        username: turnUsername,
+        credential: turnPassword,
+      } as any);
+      // Add TCP fallback for VPNs (like Cloudflare WARP) that block/break UDP
+      this.configuration.iceServers.push({
+        urls: turnServerUri.includes('?') ? turnServerUri + '&transport=tcp' : turnServerUri + '?transport=tcp',
         username: turnUsername,
         credential: turnPassword,
       } as any);
@@ -116,7 +119,8 @@ class NativeCallService {
   }
 
   private notifyStateChange() {
-    this.onStateChangeCallbacks.forEach(cb => cb(this.currentCall));
+    const state = this.currentCall ? { ...this.currentCall } : null;
+    this.onStateChangeCallbacks.forEach(cb => cb(state));
   }
 
   onStateChange(callback: (state: CallState | null) => void) {
@@ -175,16 +179,46 @@ class NativeCallService {
     });
 
     (pc as any).addEventListener('connectionstatechange', () => {
+      console.log('[WebRTC Native] Connection state changed:', pc.connectionState);
       if (this.currentCall) {
-        this.currentCall.isConnected = pc.connectionState === 'connected';
-        this.notifyStateChange();
+        if (pc.connectionState === 'connected') {
+          if (this.disconnectTimeout) {
+            clearTimeout(this.disconnectTimeout);
+            this.disconnectTimeout = null;
+          }
+          this.currentCall.isConnected = true;
+          this.notifyStateChange();
+        } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+          console.log('[WebRTC Native] Connection failed/closed, ending call');
+          if (this.disconnectTimeout) {
+            clearTimeout(this.disconnectTimeout);
+            this.disconnectTimeout = null;
+          }
+          this.handleCallEnd();
+        } else if (pc.connectionState === 'disconnected') {
+          console.log('[WebRTC Native] Connection disconnected, waiting 5s before ending...');
+          this.currentCall.isConnected = false;
+          this.notifyStateChange();
+          if (!this.disconnectTimeout) {
+            this.disconnectTimeout = setTimeout(() => {
+              if (this.pc?.connectionState === 'disconnected' || this.pc?.connectionState === 'failed') {
+                console.log('[WebRTC Native] Connection did not recover, ending call');
+                this.handleCallEnd();
+              }
+              this.disconnectTimeout = null;
+            }, 5000);
+          }
+        } else {
+          this.currentCall.isConnected = pc.connectionState === 'connected';
+          this.notifyStateChange();
+        }
       }
     });
 
     return pc;
   }
 
-  async startCall(chatId: string, calleeId: string, type: CallType): Promise<void> {
+  async startCall(chatId: string, calleeId: string | null, type: CallType): Promise<void> {
     try {
       const isVideoCall = type === 'video';
       
@@ -247,10 +281,33 @@ class NativeCallService {
     }
   }
 
+  
+  async joinCall(callId: string, chatId: string): Promise<void> {
+    console.error('[WebRTC Native] Group calls via LiveKit are not supported yet in the native app.');
+    // Needs @livekit/react-native package to be installed and Dev Client rebuilt
+  }
+
   async acceptCall(callId: string, chatId: string): Promise<void> {
+    if (this.isAccepting) {
+      console.warn('[WebRTC Native] acceptCall already in progress, ignoring duplicate call');
+      return;
+    }
+    if (this.currentCall?.isConnected) {
+      console.warn('[WebRTC Native] Call is already connected, ignoring acceptCall');
+      return;
+    }
+    this.isAccepting = true;
+    
     try {
       if (!this.pc) {
         this.pc = this.createPeerConnection();
+      }
+      
+      if (this.currentCall?.offerSdp) {
+        await this.pc.setRemoteDescription(new RTCSessionDescription({
+          type: 'offer',
+          sdp: this.currentCall.offerSdp
+        }));
       }
 
       if (!this.localStream) {
@@ -308,8 +365,10 @@ class NativeCallService {
         this.currentCall.isConnected = true;
         this.notifyStateChange();
       }
+      this.isAccepting = false;
     } catch (error) {
       console.error('Failed to accept call:', error);
+      this.isAccepting = false;
       throw error;
     }
   }
@@ -337,6 +396,11 @@ class NativeCallService {
     this.pc = null;
     this.currentCall = null;
     this.pendingIceCandidates = [];
+    this.isAccepting = false;
+    if (this.disconnectTimeout) {
+      clearTimeout(this.disconnectTimeout);
+      this.disconnectTimeout = null;
+    }
 
     this.notifyStateChange();
   }
@@ -352,14 +416,12 @@ class NativeCallService {
       isConnected: false,
       isRinging: false,
       isEnded: false,
+      offerSdp: payload.sdp,
     };
 
-    this.pc = this.createPeerConnection();
-
-    this.pc.setRemoteDescription(new RTCSessionDescription({
-      type: 'offer',
-      sdp: payload.sdp,
-    })).catch(err => console.error('Failed to set remote description:', err));
+    if (!this.pc) {
+      this.pc = this.createPeerConnection();
+    }
 
     this.notifyStateChange();
   }

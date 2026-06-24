@@ -100,6 +100,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
     const token = await Notifications.getExpoPushTokenAsync({
       projectId,
+      // @ts-ignore
       vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
     });
     return token.data;

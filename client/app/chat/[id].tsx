@@ -753,9 +753,9 @@ export default function ChatScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {
-              const calleeId = other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '';
-              if (calleeId) {
-                callService.startCall(id as string, calleeId, 'video');
+              const calleeId = isGroup ? null : (other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '');
+              if (calleeId || isGroup) {
+                callService.startCall(id as string, calleeId, 'video').catch(err => alert("Ошибка доступа к камере или микрофону: " + err.message));
               }
             }}
             style={styles.headerIconButton}
@@ -764,9 +764,9 @@ export default function ChatScreen() {
           </TouchableOpacity>
           <TouchableOpacity
             onPress={() => {
-              const calleeId = other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '';
-              if (calleeId) {
-                callService.startCall(id as string, calleeId, 'audio');
+              const calleeId = isGroup ? null : (other?.id || chat?.members?.find(m => m.user_id !== user?.id)?.user_id || '');
+              if (calleeId || isGroup) {
+                callService.startCall(id as string, calleeId, 'audio').catch(err => alert("Ошибка доступа к камере или микрофону: " + err.message));
               }
             }}
             style={styles.headerIconButton}
@@ -1084,16 +1084,17 @@ export default function ChatScreen() {
     wsService.setToken(token);
     wsService.connect();
 
-    // Join chat room after connection is established
-    const joinTimer = setTimeout(() => {
-      wsService.joinChat(id);
-    }, 500);
-
-    // Handle connection restored - retry failed messages
+    // Handle connection restored - re-join room and retry failed messages
     const unsubscribeConnect = wsService.onConnect(() => {
-      console.log('[Chat] WebSocket connected, retrying failed messages');
+      console.log('[Chat] WebSocket connected, re-joining chat and retrying failed messages');
+      wsService.joinChat(id);
       retryFailedMessages();
     });
+
+    // Join immediately if already connected (since onConnect won't fire)
+    if (wsService.isConnected()) {
+      wsService.joinChat(id);
+    }
 
     // Handle connection lost
     const unsubscribeDisconnect = wsService.onDisconnect((reason: string) => {
@@ -1235,7 +1236,7 @@ export default function ChatScreen() {
     });
 
     return () => {
-      clearTimeout(joinTimer);
+
       unsubscribe();
       unsubscribeConnect();
       unsubscribeDisconnect();
@@ -1429,6 +1430,21 @@ export default function ChatScreen() {
     const showMenuButton = canDeleteMessage || isOwn;
 
     const bubbleChildren: React.ReactNode[] = [];
+    if (msg.type === 'call_initiated') {
+      return (
+        <View style={styles.systemMessageContainer}>
+          <View style={styles.systemMessageBubble}>
+            <MaterialIcons name="call" size={20} color={primaryColor} style={{ marginRight: 8 }} />
+            <ThemedText style={styles.systemMessageText}>Начат групповой звонок</ThemedText>
+            <TouchableOpacity 
+              style={[styles.systemMessageButton, { backgroundColor: primaryColor }]}
+              onPress={() => callService.joinCall(msg.id, id as string)}>
+              <ThemedText style={styles.systemMessageButtonText}>Присоединиться</ThemedText>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
     if (msg.file_url) {
       const url = api.getFileUrl(msg.file_url);
       const isImage = msg.type === 'image' || ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg'].some(ext => url.toLowerCase().endsWith(ext));
@@ -1934,7 +1950,7 @@ export default function ChatScreen() {
             activeOpacity={1}
             onPress={() => setAttachmentMenuVisible(false)}>
             <ThemedView style={[
-              styles.actionMenuContent,
+              styles.actionMenu,
               { 
                 position: 'absolute',
                 bottom: Platform.OS === 'web' ? 80 : insets.bottom + 80,
@@ -2266,6 +2282,11 @@ const styles = StyleSheet.create({
   dot1: { opacity: 0.4 },
   dot2: { opacity: 0.7 },
   dot3: { opacity: 1 },
+  systemMessageContainer: { alignItems: 'center', marginVertical: 12 },
+  systemMessageBubble: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.05)', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 20 },
+  systemMessageText: { fontSize: 14, fontWeight: '500', marginRight: 16 },
+  systemMessageButton: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 16 },
+  systemMessageButtonText: { color: '#fff', fontSize: 14, fontWeight: '600' },
   // Search styles
   searchHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
   searchCloseButton: { padding: 8, marginRight: 8 },

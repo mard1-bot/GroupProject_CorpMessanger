@@ -28,11 +28,13 @@ export function CallProvider({ children }: CallProviderProps) {
   const [showIncomingCall, setShowIncomingCall] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = callService.onStateChange((state) => {
+    const unsubscribe = callService.onStateChange((state: CallState | null) => {
       setCurrentCall(state);
       
       // Show incoming call modal when receiving a call
-      if (state && !state.isCaller && !state.isConnected && !state.isRinging) {
+      if (!state) {
+        setShowIncomingCall(false);
+      } else if (!state.isCaller && !state.isConnected && !state.isRinging) {
         setShowIncomingCall(true);
         // Fetch caller info and chat info for group name
         api.getUserById(state.callerId).then(res => {
@@ -101,21 +103,19 @@ export function CallProvider({ children }: CallProviderProps) {
   return (
     <CallContext.Provider value={value}>
       {children}
-      {currentCall && (
-        <CallModal
-          visible={true}
-          onClose={() => {
-            if (currentCall && !currentCall.isEnded) {
-              callService.endCall();
-            }
-            setShowIncomingCall(false);
-          }}
-          chatId={currentCall.chatId}
-          calleeId={currentCall.isCaller ? currentCall.calleeId : currentCall.callerId}
-          calleeName={callerName}
-          callType={currentCall.type}
-        />
-      )}
+      <CallModal
+        visible={!!currentCall}
+        onClose={() => {
+          if (currentCall && !currentCall.isEnded) {
+            callService.endCall();
+          }
+          setShowIncomingCall(false);
+        }}
+        chatId={currentCall?.chatId || ''}
+        calleeId={(currentCall?.isCaller ? currentCall.calleeId : currentCall?.callerId) || undefined}
+        calleeName={callerName}
+        callType={currentCall?.type || 'audio'}
+      />
     </CallContext.Provider>
   );
 }

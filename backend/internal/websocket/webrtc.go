@@ -26,6 +26,7 @@ const (
 	EventCallEnd     = "call_end"
 	EventCallReject  = "call_reject"
 	EventCallAccept  = "call_accept"
+	EventCallJoin    = "call_join"
 	EventCallBusy    = "call_busy"
 	EventCallRinging = "call_ringing"
 	EventCallError   = "call_error"
@@ -41,12 +42,17 @@ const (
 
 // CallOfferPayload represents a WebRTC offer
 type CallOfferPayload struct {
-	CallID   uuid.UUID `json:"call_id"`
-	ChatID   uuid.UUID `json:"chat_id"`
-	CallerID uuid.UUID `json:"caller_id"`
-	CalleeID uuid.UUID `json:"callee_id"`
-	Type     CallType  `json:"type"`
-	SDP      string    `json:"sdp"`
+	CallID   uuid.UUID  `json:"call_id"`
+	ChatID   uuid.UUID  `json:"chat_id"`
+	CallerID uuid.UUID  `json:"caller_id"`
+	CalleeID *uuid.UUID `json:"callee_id,omitempty"`
+	Type     CallType   `json:"type"`
+	SDP      string     `json:"sdp"`
+}
+
+// CallJoinPayload represents a request to join an active call
+type CallJoinPayload struct {
+	CallID uuid.UUID `json:"call_id"`
 }
 
 // CallAnswerPayload represents a WebRTC answer
@@ -216,14 +222,19 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	}
 
 	// Verify caller is in the chat room
-	h.mu.RLock()
-	room, callerInRoom := h.rooms[offer.ChatID]
-	if callerInRoom {
-		_, callerInRoom = room[client]
+	members, err := h.storage.GetChatMembers(context.Background(), offer.ChatID)
+	if err != nil {
+		log.Printf("[WebRTC] Failed to get chat members: %v", err)
+		return
 	}
-	// Verify callee is online (anywhere in the app)
-	calleeClient, calleeOnline := h.userClients[offer.CalleeID]
-	h.mu.RUnlock()
+	
+	callerInRoom := false
+	for _, member := range members {
+		if member.UserID == client.UserID {
+			callerInRoom = true
+			break
+		}
+	}
 
 	if !callerInRoom {
 		h.sendToClient(client, &BroadcastMessage{
@@ -239,107 +250,95 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 		return
 	}
 
-	if !calleeOnline {
-		h.sendToClient(client, &BroadcastMessage{
-			Type:   EventCallError,
-			ChatID: offer.ChatID,
-			Payload: map[string]interface{}{
-				"call_id": "",
-				"error":   "callee_not_in_chat", // Keeping same error code for client compatibility, but meaning is "callee offline"
-				"message": "Callee is offline or not reachable",
-			},
-		})
-		log.Printf("[WebRTC] Call offer rejected: callee %s is offline", offer.CalleeID)
-		return
+	isGroupCall := offer.CalleeID == nil
+	offer.CallerID = client.UserID
+
+	var call *ActiveCall
+	var targetIDs []uuid.UUID
+
+	if isGroupCall {
+		members, err := h.storage.GetChatMembers(context.Background(), offer.ChatID)
+		if err != nil {
+			log.Printf("[WebRTC] Failed to get chat members: %v", err)
+			return
+		}
+		
+		participantIDs := make([]uuid.UUID, 0)
+		for _, m := range members {
+			if m.UserID != client.UserID {
+				participantIDs = append(participantIDs, m.UserID)
+				targetIDs = append(targetIDs, m.UserID)
+			}
+		}
+		
+		call = h.callManager.StartGroupCall(offer.ChatID, offer.CallerID, participantIDs, offer.Type)
+	} else {
+		calleeUUID := *offer.CalleeID
+		
+		// Verify callee is online
+		h.mu.RLock()
+		_, calleeOnline := h.userClients[calleeUUID]
+		h.mu.RUnlock()
+
+		if !calleeOnline {
+			h.sendToClient(client, &BroadcastMessage{
+				Type:   EventCallError,
+				ChatID: offer.ChatID,
+				Payload: map[string]interface{}{
+					"call_id": "",
+					"error":   "callee_offline",
+					"message": "User is not online",
+				},
+			})
+							log.Printf("[WebRTC] Call offer rejected: callee %s is offline", calleeUUID)
+				return
+		}
+
+		if h.callManager.IsUserInCall(calleeUUID) {
+			h.sendToClient(client, &BroadcastMessage{
+				Type:   EventCallError,
+				ChatID: offer.ChatID,
+				Payload: map[string]interface{}{
+					"call_id":   "",
+					"error":     "callee_busy",
+					"message":   "User is already in a call",
+					"callee_id": calleeUUID,
+				},
+			})
+							log.Printf("[WebRTC] Call offer rejected: callee %s is busy", calleeUUID)
+				return
+		}
+
+		call = h.callManager.StartCall(offer.ChatID, offer.CallerID, calleeUUID, offer.Type)
+		targetIDs = []uuid.UUID{calleeUUID}
 	}
 
-	// Check if callee is already in a call
-	if h.callManager.IsUserInCall(offer.CalleeID) {
-		// Send busy signal to caller
-		h.sendToClient(client, &BroadcastMessage{
-			Type:   EventCallError,
-			ChatID: offer.ChatID,
-			Payload: map[string]interface{}{
-				"call_id":   "",
-				"error":     "callee_busy",
-				"message":   "User is already in a call",
-				"callee_id": offer.CalleeID,
-			},
-		})
-		log.Printf("[WebRTC] Call offer rejected: callee %s is busy", offer.CalleeID)
-		return
-	}
-
-	// Create the call
-	call := h.callManager.StartCall(offer.ChatID, offer.CallerID, offer.CalleeID, offer.Type)
-
-	// Update offer with generated call ID
 	offer.CallID = call.ID
-	offer.CallerID = client.UserID // Ensure caller ID matches authenticated user
-
-	// Generate LiveKit room name (using call ID)
 	roomName := call.ID.String()
 
-	// Create LiveKit room and generate tokens
 	var liveKitRoom *LiveKitRoomInfo
 	if h.liveKit != nil && h.liveKit.IsConfigured() {
-		// Create LiveKit room
 		ctx := context.Background()
 		if err := h.liveKit.CreateRoom(ctx, roomName); err != nil {
 			log.Printf("[WebRTC] Failed to create LiveKit room: %v", err)
-			// Continue without LiveKit - fallback to peer-to-peer
 		} else {
-			// Generate tokens for both participants
 			callerToken, err := h.liveKit.GenerateToken(roomName, offer.CallerID.String())
-			if err != nil {
-				log.Printf("[WebRTC] Failed to generate caller token: %v", err)
-			}
-			calleeToken, err := h.liveKit.GenerateToken(roomName, offer.CalleeID.String())
-			if err != nil {
-				log.Printf("[WebRTC] Failed to generate callee token: %v", err)
-			}
-
-			if callerToken != "" && calleeToken != "" {
+			if err == nil && callerToken != "" {
 				liveKitRoom = &LiveKitRoomInfo{
 					RoomName:    roomName,
 					URL:         h.liveKitURL,
 					CallerToken: callerToken,
-					CalleeToken: calleeToken,
 				}
 				log.Printf("[WebRTC] LiveKit room created: %s", roomName)
-			} else {
-				log.Printf("[WebRTC] Failed to generate valid LiveKit tokens, falling back to P2P")
 			}
 		}
 	}
 
-	// Find the callee client using userClients map
-	h.mu.RLock()
-	calleeClient = h.userClients[offer.CalleeID]
-	h.mu.RUnlock()
-
-	if calleeClient == nil {
-		// Callee is not online
-		h.sendToClient(client, &BroadcastMessage{
-			Type:   EventCallError,
-			ChatID: offer.ChatID,
-			Payload: map[string]interface{}{
-				"call_id":   "",
-				"error":     "callee_offline",
-				"message":   "User is not online",
-				"callee_id": offer.CalleeID,
-			},
-		})
-		log.Printf("[WebRTC] Call offer rejected: callee %s is not online", offer.CalleeID)
-		h.callManager.EndCall(call.ID)
-		return
-	}
-
-	// Send call_id back to caller only after validating callee is online
 	callerPayload := map[string]interface{}{
 		"call_id": call.ID,
 		"chat_id": offer.ChatID,
 		"type":    offer.Type,
+				"is_group": isGroupCall,
 		"sdp":     offer.SDP,
 	}
 	if liveKitRoom != nil {
@@ -350,40 +349,122 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 		}
 	}
 	h.sendToClient(client, &BroadcastMessage{
-		Type:    EventCallOffer,
+		Type:    EventCallJoin,
 		ChatID:  offer.ChatID,
 		Payload: callerPayload,
 	})
 
-	// Send offer to specific callee
-	calleePayload := map[string]interface{}{
-		"call_id":   call.ID,
-		"chat_id":   offer.ChatID,
-		"caller_id": client.UserID,
-		"type":      offer.Type,
-		"sdp":       offer.SDP,
-	}
-	if liveKitRoom != nil {
-		calleePayload["livekit"] = map[string]interface{}{
-			"room_name": liveKitRoom.RoomName,
-			"url":       liveKitRoom.URL,
-			"token":     liveKitRoom.CalleeToken,
+	// Broadcast call offer to participants
+	h.mu.RLock()
+	for _, pid := range targetIDs {
+		if targetClient, ok := h.userClients[pid]; ok {
+			calleePayload := map[string]interface{}{
+				"call_id":   call.ID,
+				"chat_id":   offer.ChatID,
+				"caller_id": client.UserID,
+				"type":      offer.Type,
+								"is_group":   isGroupCall,
+				"sdp":       offer.SDP,
+			}
+			
+			// For 1-on-1 calls, generate tokens immediately
+			if liveKitRoom != nil && !isGroupCall {
+				calleeToken, err := h.liveKit.GenerateToken(roomName, pid.String())
+				if err == nil && calleeToken != "" {
+					calleePayload["livekit"] = map[string]interface{}{
+						"room_name": liveKitRoom.RoomName,
+						"url":       liveKitRoom.URL,
+						"token":     calleeToken,
+					}
+				}
+			}
+			
+			h.sendToClient(targetClient, &BroadcastMessage{
+				Type:    EventCallOffer,
+				ChatID:  offer.ChatID,
+				Payload: calleePayload,
+			})
 		}
 	}
-	h.sendToClient(calleeClient, &BroadcastMessage{
-		Type:    EventCallOffer,
-		ChatID:  offer.ChatID,
-		Payload: calleePayload,
-	})
+	h.mu.RUnlock()
 
-	log.Printf("[WebRTC] Call offer sent: %s to callee %s (LiveKit: %v)", call.ID, offer.CalleeID, liveKitRoom != nil)
-
-	// Create system message for call initiated
 	go func() {
 		if err := h.CreateCallSystemMessage(context.Background(), offer.ChatID, client.UserID, "call_initiated"); err != nil {
 			log.Printf("[WebRTC] Failed to create call initiated message: %v", err)
 		}
 	}()
+}
+
+// HandleCallJoin processes a request to join an active group call
+func (h *Hub) HandleCallJoin(client *Client, payload []byte) {
+	var joinPayload CallJoinPayload
+	if err := json.Unmarshal(payload, &joinPayload); err != nil {
+		log.Printf("[WebRTC] Invalid call join: %v", err)
+		return
+	}
+
+	call := h.callManager.GetCall(joinPayload.CallID)
+	if call == nil {
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    EventCallError,
+			Payload: map[string]interface{}{"error": "call_not_found"},
+		})
+		return
+	}
+
+	members, err := h.storage.GetChatMembers(context.Background(), call.ChatID)
+	if err != nil {
+		log.Printf("[WebRTC] Failed to get chat members: %v", err)
+		return
+	}
+	
+	inRoom := false
+	for _, member := range members {
+		if member.UserID == client.UserID {
+			inRoom = true
+			break
+		}
+	}
+
+	if !inRoom {
+		h.sendToClient(client, &BroadcastMessage{
+			Type:    EventCallError,
+			Payload: map[string]interface{}{"error": "not_chat_member"},
+		})
+		return
+	}
+
+	h.callManager.AddParticipant(call.ID, client.UserID)
+
+	roomName := call.ID.String()
+	var liveKitToken string
+	if h.liveKit != nil && h.liveKit.IsConfigured() {
+		var err error
+		liveKitToken, err = h.liveKit.GenerateToken(roomName, client.UserID.String())
+		if err != nil {
+			log.Printf("[WebRTC] Failed to generate token for joining user: %v", err)
+		}
+	}
+
+	replyPayload := map[string]interface{}{
+		"call_id": call.ID,
+		"chat_id": call.ChatID,
+		"type":    call.Type,
+	}
+	if liveKitToken != "" {
+		replyPayload["livekit"] = map[string]interface{}{
+			"room_name": roomName,
+			"url":       h.liveKitURL,
+			"token":     liveKitToken,
+		}
+	}
+
+	h.sendToClient(client, &BroadcastMessage{
+		Type:    EventCallJoin,
+		ChatID:  call.ChatID,
+		Payload: replyPayload,
+	})
+	log.Printf("[WebRTC] Client %s joined call %s", client.UserID, call.ID)
 }
 
 // HandleCallAnswer processes a call answer
@@ -400,8 +481,11 @@ func (h *Hub) HandleCallAnswer(client *Client, payload []byte) {
 		return
 	}
 
-	// Mark call as answered
-	h.callManager.MarkCallAsAnswered(answer.CallID)
+	// Check if already answered to prevent duplicate system messages
+	alreadyAnswered := call.Answered
+	if !alreadyAnswered {
+		h.callManager.MarkCallAsAnswered(answer.CallID)
+	}
 
 	// Find the caller client
 	h.mu.RLock()
@@ -422,14 +506,16 @@ func (h *Hub) HandleCallAnswer(client *Client, payload []byte) {
 		log.Printf("[WebRTC] Caller not online for answer: %s", call.CallerID)
 	}
 
-	log.Printf("[WebRTC] Call answer sent: %s", answer.CallID)
+	log.Printf("[WebRTC] Call answer sent: %s (already_answered: %v)", answer.CallID, alreadyAnswered)
 
-	// Create system message for call accepted
-	go func() {
-		if err := h.CreateCallSystemMessage(context.Background(), call.ChatID, client.UserID, "call_accepted"); err != nil {
-			log.Printf("[WebRTC] Failed to create call accepted message: %v", err)
-		}
-	}()
+	// Create system message only on first answer
+	if !alreadyAnswered {
+		go func() {
+			if err := h.CreateCallSystemMessage(context.Background(), call.ChatID, client.UserID, "call_accepted"); err != nil {
+				log.Printf("[WebRTC] Failed to create call accepted message: %v", err)
+			}
+		}()
+	}
 }
 
 // HandleCallIce processes ICE candidates
@@ -498,13 +584,14 @@ func (h *Hub) HandleCallEnd(client *Client, payload []byte) {
 		return
 	}
 
-	// Broadcast end to all participants
+	// Broadcast end to all participants except the sender
 	h.BroadcastToChat(&BroadcastMessage{
 		Type:   EventCallEnd,
 		ChatID: call.ChatID,
 		Payload: map[string]interface{}{
 			"call_id": data.CallID,
 		},
+		ExcludeSender: &client.UserID,
 	})
 
 	h.callManager.EndCall(data.CallID)

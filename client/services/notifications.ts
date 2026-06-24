@@ -47,6 +47,11 @@ class NotificationService {
 
   async registerDeviceToken(): Promise<void> {
     try {
+      if (Platform.OS === 'web') {
+        console.log('Web push notifications require Firebase configuration. Skipping for now.');
+        return;
+      }
+
       const hasPermission = await this.requestPermissions();
       if (!hasPermission) {
         console.warn('Notification permissions not granted');
@@ -56,7 +61,8 @@ class NotificationService {
       const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
       const token = await Notifications.getExpoPushTokenAsync({
         projectId,
-        vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
+        // @ts-ignore
+      vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
       });
 
       this.token = token.data;

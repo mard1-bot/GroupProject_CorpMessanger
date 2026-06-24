@@ -44,6 +44,7 @@ export interface CallState {
   liveKitToken?: string;
   offerSdp?: string;
   participants?: any[];
+  isGroup?: boolean;
 }
 
 class WebCallService {
@@ -69,6 +70,11 @@ class WebCallService {
     wsService.onMessage((message) => {
       const payload = message.payload;
       switch (message.type) {
+        case 'call_error':
+          console.error('[WebRTC] Call error received:', message.payload);
+          alert('Ошибка звонка: ' + (message.payload.message || message.payload.error));
+          this.handleCallEnd();
+          break;
         case 'call_offer':
           if (this.currentCall?.isCaller) {
             if (!this.currentCall?.callId && payload?.call_id) {
@@ -96,6 +102,9 @@ class WebCallService {
             // Incoming call
             this.handleIncomingCall(payload);
           }
+          break;
+        case 'call_join':
+          this.handleJoinResponse(message.payload);
           break;
         case 'call_answer':
           this.handleAnswer(message.payload);
@@ -189,22 +198,17 @@ class WebCallService {
     };
   }
 
-  private createPeerConnection() {
-    // Configure ICE servers with STUN and TURN
+  private getIceServers(): RTCIceServer[] {
     const iceServers: RTCIceServer[] = [
-      // Google STUN servers
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
       { urls: 'stun:stun3.l.google.com:19302' },
       { urls: 'stun:stun4.l.google.com:19302' },
-      // Mozilla STUN servers
       { urls: 'stun:stun.services.mozilla.com' },
-      // Twilio STUN servers (free)
       { urls: 'stun:global.stun.twilio.com:3478' },
     ];
 
-    // Add TURN server if configured
     const turnServerUri = process.env.EXPO_PUBLIC_TURN_SERVER_URI;
     const turnUsername = process.env.EXPO_PUBLIC_TURN_USERNAME;
     const turnPassword = process.env.EXPO_PUBLIC_TURN_PASSWORD;
@@ -219,7 +223,11 @@ class WebCallService {
     } else {
       console.warn('[WebRTC] TURN server not configured - calls may fail behind NAT. For production, configure a TURN server.');
     }
+    return iceServers;
+  }
 
+  private createPeerConnection() {
+    const iceServers = this.getIceServers();
     const pc = new RTCPeerConnection({ iceServers });
 
     pc.onicecandidate = (event) => {
@@ -248,7 +256,7 @@ class WebCallService {
     };
 
     pc.onconnectionstatechange = () => {
-      if (this.currentCall) {
+      if (this.currentCall && !this.liveKitRoom) {
         this.currentCall.isConnected = pc.connectionState === 'connected';
         this.notifyStateChange();
       }
@@ -257,7 +265,7 @@ class WebCallService {
     return pc;
   }
 
-  async startCall(chatId: string, calleeId: string, type: CallType): Promise<void> {
+  async startCall(chatId: string, calleeId: string | null, type: CallType): Promise<void> {
     try {
       const isVideoCall = type === 'video';
       console.log('[WebRTC] Starting call:', { chatId, calleeId, type, isVideoCall });
@@ -336,12 +344,12 @@ class WebCallService {
 
   private async connectToLiveKitRoom(roomName: string, url: string, token: string) {
     console.log('[LiveKit] Connecting to room:', roomName);
-    
+
     if (!Room || !RoomEvent) {
       console.error('[LiveKit] LiveKit not available');
       return;
     }
-    
+
     const room = new Room();
     
     room.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
@@ -411,42 +419,115 @@ class WebCallService {
     console.log('[LiveKit] Room connection successful');
   }
 
+  
+  async joinCall(callId: string, chatId: string): Promise<void> {
+    console.log('[WebRTC] Joining active call:', callId);
+    try {
+      if (this.currentCall) {
+        this.currentCall.isRinging = false;
+      } else {
+        this.currentCall = {
+          callId,
+          chatId,
+          callerId: '',
+          calleeId: null,
+          type: 'audio', // Will be updated from response
+          isCaller: false,
+          isConnected: false,
+          isRinging: false,
+          isEnded: false,
+        };
+      }
+      this.notifyStateChange();
+      
+      wsService.send('call_join', {
+        call_id: callId
+      });
+    } catch (error) {
+      console.error('Failed to send join request:', error);
+      throw error;
+    }
+  }
+
+  private async handleJoinResponse(payload: any) {
+    console.log('[WebRTC] Received join response:', payload);
+    if (!this.currentCall) return;
+    
+    if (payload.type) {
+      this.currentCall.type = payload.type;
+    }
+    this.notifyStateChange();
+    
+    if (payload.livekit) {
+      this.currentCall.liveKitRoom = payload.livekit.room_name;
+      this.currentCall.liveKitURL = payload.livekit.url;
+      this.currentCall.liveKitToken = payload.livekit.token;
+      
+      const isVideoCall = this.currentCall.type === 'video';
+      try {
+        this.localStream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: isVideoCall,
+        });
+        this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
+      } catch (e) {
+        console.error('Media error on join:', e);
+      }
+      
+      this.connectToLiveKitRoom(
+        payload.livekit.room_name,
+        payload.livekit.url,
+        payload.livekit.token
+      ).catch(e => console.error('Failed to connect to LiveKit:', e));
+    } else {
+      console.error('[WebRTC] LiveKit is required for group calls, fallback not supported for join yet');
+    }
+  }
+
   async acceptCall(callId: string, chatId: string): Promise<void> {
     console.log('[WebRTC] acceptCall called with callId:', callId, 'chatId:', chatId);
     try {
-      // Check if LiveKit is available
-      if (this.currentCall?.liveKitRoom && this.currentCall?.liveKitURL && this.currentCall?.liveKitToken) {
-        console.log('[LiveKit] Using LiveKit for call');
-        
-        if (!this.localStream) {
-          const isVideoCall = this.currentCall?.type === 'video';
-          try {
-            this.localStream = await navigator.mediaDevices.getUserMedia({
-              audio: true,
-              video: isVideoCall,
-            });
-            this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
-          } catch (mediaError: any) {
-            console.error('[WebRTC] Media access error:', mediaError);
-            if (isVideoCall) {
-              try {
-                this.localStream = await navigator.mediaDevices.getUserMedia({
-                  audio: true,
-                  video: false,
-                });
-                if (this.currentCall) {
-                  this.currentCall.type = 'audio';
-                }
-                this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
-              } catch (audioError: any) {
-                throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
+      if (!this.localStream) {
+        const isVideoCall = this.currentCall?.type === 'video';
+        try {
+          this.localStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: isVideoCall,
+          });
+          this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
+        } catch (mediaError: any) {
+          console.error('[WebRTC] Media access error:', mediaError);
+          if (isVideoCall) {
+            try {
+              this.localStream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+                video: false,
+              });
+              if (this.currentCall) {
+                this.currentCall.type = 'audio';
               }
-            } else {
-              throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
+              this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
+            } catch (audioError: any) {
+              throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
             }
+          } else {
+            throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
           }
         }
+      }
 
+      // Check if LiveKit is available or if it's a group call
+      if (this.currentCall?.isGroup) {
+        console.log('[WebRTC] Group call, sending call_join to get LiveKit credentials');
+        wsService.send('call_join', { call_id: callId, chat_id: this.currentCall.chatId });
+        
+        if (this.currentCall) {
+          this.currentCall.isConnected = true;
+          this.notifyStateChange();
+        }
+        return;
+      } else if (this.currentCall?.liveKitRoom && this.currentCall?.liveKitURL && this.currentCall?.liveKitToken) {
+        console.log('[LiveKit] Using pre-populated LiveKit for call');
         await this.connectToLiveKitRoom(
           this.currentCall.liveKitRoom,
           this.currentCall.liveKitURL,
@@ -611,6 +692,7 @@ class WebCallService {
       isConnected: false,
       isRinging: false,
       isEnded: false,
+      isGroup: payload.is_group === true,
       liveKitRoom: payload.livekit?.room_name,
       liveKitURL: payload.livekit?.url,
       liveKitToken: payload.livekit?.token,
