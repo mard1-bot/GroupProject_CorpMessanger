@@ -291,10 +291,6 @@ func (c *Client) handleMessage(msg *WSMessage) {
 	// WebRTC call events
 	case EventCallOffer:
 		c.hub.HandleCallOffer(c, msg.Payload)
-	case EventCallAnswer:
-		c.hub.HandleCallAnswer(c, msg.Payload)
-	case EventCallIce:
-		c.hub.HandleCallIce(c, msg.Payload)
 	case EventCallEnd:
 		c.hub.HandleCallEnd(c, msg.Payload)
 	case EventCallReject:

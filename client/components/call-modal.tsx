@@ -219,10 +219,12 @@ export function CallModal({
           </Text>
           <Text style={[styles.status, { color: '#888' }]}>
             {videoFallback ? 'Видео недоступно. Аудиозвонок...' :
-              isIncoming ? 'Входящий звонок...' :
-                isConnecting ? 'Соединение...' :
-                  callState?.isRinging ? 'Звонит...' :
-                    callState?.isConnected ? 'В разговоре' : 'Звонок завершен'}
+              !callState ? 'Ожидание...' :
+                callState.isEnded ? 'Звонок завершен' :
+                  isIncoming ? 'Входящий звонок...' :
+                    isConnecting ? 'Соединение...' :
+                      callState.isRinging ? 'Звонит...' :
+                        callState.isConnected ? 'В разговоре' : 'Звонит...'}
           </Text>
         </View>
 

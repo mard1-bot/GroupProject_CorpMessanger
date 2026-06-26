@@ -145,6 +145,7 @@ func (s *messageService) SendMessage(ctx context.Context, input SendMessageInput
 		}
 
 		go func() {
+			s.logger.Info("[Notifications] goroutine started", "chat_id", msg.ChatID, "sender_id", input.SenderID, "member_count", len(members))
 			for _, member := range members {
 				if member.UserID == input.SenderID {
 					continue
@@ -167,7 +168,10 @@ func (s *messageService) SendMessage(ctx context.Context, input SendMessageInput
 					},
 				}
 
-				_ = s.notificationSvc.SendToUser(context.Background(), member.UserID, payload)
+				s.logger.Info("[Notifications] calling SendToUser", "user_id", member.UserID)
+				if err := s.notificationSvc.SendToUser(context.Background(), member.UserID, payload); err != nil {
+					s.logger.Error("[Notifications] SendToUser failed", "error", err, "user_id", member.UserID)
+				}
 			}
 		}()
 	}

@@ -225,6 +225,8 @@ services:
       SCHEDULER_ENABLED: "true"
       REDIS_URL: 127.0.0.1:6379
       SENTRY_DSN_FILE: /run/secrets/sentry_dsn
+      VAPID_PUBLIC_KEY: "BDxQrS09IYxG9Za7P2VJ4mRBi1yASey-8PqskldZypnoL_Rqu6EMMy1n7UWxXAjrpyQxzMuGtoj_7MONOnQUVXw"
+      VAPID_PRIVATE_KEY: "4nnPtrRxpy5kX0iMXgSqnY-YbxOM0N8laoWrv3dpPtw"
     depends_on:
       postgres:
         condition: service_healthy

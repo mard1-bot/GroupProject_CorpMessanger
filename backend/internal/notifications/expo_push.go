@@ -31,7 +31,8 @@ func NewExpoPushClient(apiKey string, logger *slog.Logger) *ExpoPushClient {
 
 // IsConfigured returns true if Expo Push API is configured
 func (c *ExpoPushClient) IsConfigured() bool {
-	return c.apiKey != ""
+	// Expo Push API allows anonymous requests (without API key)
+	return true
 }
 
 // ExpoPushMessage represents a push notification message for Expo

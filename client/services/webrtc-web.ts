@@ -48,9 +48,7 @@ export interface CallState {
 }
 
 class WebCallService {
-  private pc: RTCPeerConnection | null = null;
   private localStream: MediaStream | null = null;
-  private remoteStream: MediaStream | null = null;
   private currentCall: CallState | null = null;
   private onStateChangeCallbacks: ((state: CallState | null) => void)[] = [];
   private onLocalStreamCallbacks: ((stream: MediaStream) => void)[] = [];
@@ -60,7 +58,6 @@ class WebCallService {
   private onParticipantStreamCallbacks: ((identity: string, stream: MediaStream) => void)[] = [];
   private liveKitRoom: any = null;
   private remoteStreams: Map<string, MediaStream> = new Map();
-  private pendingIceCandidates: { candidate: string; sdp_mline_index: number | null; sdp_mid: string | null }[] = [];
 
   constructor() {
     this.setupWebSocketListeners();
@@ -94,7 +91,6 @@ class WebCallService {
                 ).catch(e => console.error('Failed to connect to LiveKit:', e));
               }
 
-              this.flushPendingIceCandidates();
               this.notifyStateChange();
             }
             // Ignore any reflected or duplicate call_offers if we are already the caller
@@ -108,9 +104,6 @@ class WebCallService {
           break;
         case 'call_answer':
           this.handleAnswer(message.payload);
-          break;
-        case 'call_ice':
-          this.handleIceCandidate(message.payload);
           break;
         case 'call_end':
           this.handleCallEnd();
@@ -126,20 +119,6 @@ class WebCallService {
           break;
       }
     });
-  }
-
-  private flushPendingIceCandidates() {
-    if (!this.currentCall?.callId) return;
-    const callId = this.currentCall.callId;
-    for (const ice of this.pendingIceCandidates) {
-      wsService.send('call_ice', {
-        call_id: callId,
-        candidate: ice.candidate,
-        sdp_mline_index: ice.sdp_mline_index,
-        sdp_mid: ice.sdp_mid,
-      });
-    }
-    this.pendingIceCandidates = [];
   }
 
   private notifyStateChange() {
@@ -165,9 +144,6 @@ class WebCallService {
 
   onRemoteStream(callback: (stream: MediaStream) => void) {
     this.onRemoteStreamCallbacks.push(callback);
-    if (this.remoteStream) {
-      callback(this.remoteStream);
-    }
     return () => {
       this.onRemoteStreamCallbacks = this.onRemoteStreamCallbacks.filter(cb => cb !== callback);
     };
@@ -198,72 +174,7 @@ class WebCallService {
     };
   }
 
-  private getIceServers(): RTCIceServer[] {
-    const iceServers: RTCIceServer[] = [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
-      { urls: 'stun:stun.services.mozilla.com' },
-      { urls: 'stun:global.stun.twilio.com:3478' },
-    ];
 
-    const turnServerUri = process.env.EXPO_PUBLIC_TURN_SERVER_URI;
-    const turnUsername = process.env.EXPO_PUBLIC_TURN_USERNAME;
-    const turnPassword = process.env.EXPO_PUBLIC_TURN_PASSWORD;
-
-    if (turnServerUri && turnUsername && turnPassword) {
-      iceServers.push({
-        urls: turnServerUri,
-        username: turnUsername,
-        credential: turnPassword,
-      });
-      console.log('[WebRTC] Using TURN server:', turnServerUri);
-    } else {
-      console.warn('[WebRTC] TURN server not configured - calls may fail behind NAT. For production, configure a TURN server.');
-    }
-    return iceServers;
-  }
-
-  private createPeerConnection() {
-    const iceServers = this.getIceServers();
-    const pc = new RTCPeerConnection({ iceServers });
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && this.currentCall) {
-        if (this.currentCall.callId) {
-          wsService.send('call_ice', {
-            call_id: this.currentCall.callId,
-            candidate: event.candidate.candidate,
-            sdp_mline_index: event.candidate.sdpMLineIndex,
-            sdp_mid: event.candidate.sdpMid,
-          });
-        } else {
-          // Buffer ICE candidates until callId is assigned
-          this.pendingIceCandidates.push({
-            candidate: event.candidate.candidate,
-            sdp_mline_index: event.candidate.sdpMLineIndex,
-            sdp_mid: event.candidate.sdpMid,
-          });
-        }
-      }
-    };
-
-    pc.ontrack = (event) => {
-      this.remoteStream = event.streams[0];
-      this.onRemoteStreamCallbacks.forEach(cb => cb(event.streams[0]));
-    };
-
-    pc.onconnectionstatechange = () => {
-      if (this.currentCall && !this.liveKitRoom) {
-        this.currentCall.isConnected = pc.connectionState === 'connected';
-        this.notifyStateChange();
-      }
-    };
-
-    return pc;
-  }
 
   async startCall(chatId: string, calleeId: string | null, type: CallType): Promise<void> {
     try {
@@ -308,20 +219,10 @@ class WebCallService {
         this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
       }
 
-      this.pc = this.createPeerConnection();
-
-      this.localStream.getTracks().forEach(track => {
-        this.pc!.addTrack(track, this.localStream!);
-      });
-
-      const offer = await this.pc.createOffer();
-      await this.pc.setLocalDescription(offer);
-
       wsService.send('call_offer', {
         chat_id: chatId,
         callee_id: calleeId,
         type: type,
-        sdp: offer.sdp,
       });
 
       this.currentCall = {
@@ -355,12 +256,18 @@ class WebCallService {
     room.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
       console.log('[LiveKit] Track subscribed:', track.kind, 'from', participant.identity);
       if (track.kind === 'video' || track.kind === 'audio') {
-        const stream = new MediaStream();
+        let stream = this.remoteStreams.get(participant.identity);
+        if (!stream) {
+          stream = new MediaStream();
+          this.remoteStreams.set(participant.identity, stream);
+        }
         stream.addTrack(track.mediaStreamTrack!);
-        this.remoteStreams.set(participant.identity, stream);
-        this.onRemoteStreamCallbacks.forEach(cb => cb(stream));
-        // Notify about participant stream for group calls
-        this.onParticipantStreamCallbacks.forEach(cb => cb(participant.identity, stream));
+        
+        // Use a slight timeout to batch multiple rapid track events
+        setTimeout(() => {
+          this.onRemoteStreamCallbacks.forEach(cb => cb(stream!));
+          this.onParticipantStreamCallbacks.forEach(cb => cb(participant.identity, stream!));
+        }, 50);
       }
     });
 
@@ -453,6 +360,14 @@ class WebCallService {
     console.log('[WebRTC] Received join response:', payload);
     if (!this.currentCall) return;
     
+    // Update callId if we are the caller and don't have it yet
+    if (this.currentCall.isCaller && !this.currentCall.callId && payload.call_id) {
+      this.currentCall.callId = payload.call_id;
+    } else if (payload.call_id !== this.currentCall.callId) {
+      // Ignore join response for different calls
+      return;
+    }
+
     if (payload.type) {
       this.currentCall.type = payload.type;
     }
@@ -478,7 +393,12 @@ class WebCallService {
         payload.livekit.room_name,
         payload.livekit.url,
         payload.livekit.token
-      ).catch(e => console.error('Failed to connect to LiveKit:', e));
+      ).then(() => {
+        if (this.currentCall) {
+          this.currentCall.isConnected = true;
+          this.notifyStateChange();
+        }
+      }).catch(e => console.error('Failed to connect to LiveKit:', e));
     } else {
       console.error('[WebRTC] LiveKit is required for group calls, fallback not supported for join yet');
     }
@@ -486,19 +406,30 @@ class WebCallService {
 
   async acceptCall(callId: string, chatId: string): Promise<void> {
     console.log('[WebRTC] acceptCall called with callId:', callId, 'chatId:', chatId);
+    console.log('[WebRTC] acceptCall currentCall state:', {
+      hasCurrentCall: !!this.currentCall,
+      isGroup: this.currentCall?.isGroup,
+      hasLiveKitRoom: !!this.currentCall?.liveKitRoom,
+      hasLiveKitURL: !!this.currentCall?.liveKitURL,
+      hasLiveKitToken: !!this.currentCall?.liveKitToken,
+      liveKitRoom: this.currentCall?.liveKitRoom,
+    });
     try {
       if (!this.localStream) {
         const isVideoCall = this.currentCall?.type === 'video';
+        console.log('[WebRTC] acceptCall: requesting media, isVideoCall:', isVideoCall);
         try {
           this.localStream = await navigator.mediaDevices.getUserMedia({
             audio: true,
             video: isVideoCall,
           });
+          console.log('[WebRTC] acceptCall: media obtained successfully');
           this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
         } catch (mediaError: any) {
-          console.error('[WebRTC] Media access error:', mediaError);
+          console.error('[WebRTC] acceptCall: media access error:', mediaError);
           if (isVideoCall) {
             try {
+              console.log('[WebRTC] acceptCall: falling back to audio-only');
               this.localStream = await navigator.mediaDevices.getUserMedia({
                 audio: true,
                 video: false,
@@ -506,6 +437,7 @@ class WebCallService {
               if (this.currentCall) {
                 this.currentCall.type = 'audio';
               }
+              console.log('[WebRTC] acceptCall: audio-only fallback success');
               this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
             } catch (audioError: any) {
               throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
@@ -514,9 +446,11 @@ class WebCallService {
             throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
           }
         }
+      } else {
+        console.log('[WebRTC] acceptCall: localStream already exists');
       }
 
-      // Check if LiveKit is available or if it's a group call
+      // Use LiveKit for all calls
       if (this.currentCall?.isGroup) {
         console.log('[WebRTC] Group call, sending call_join to get LiveKit credentials');
         wsService.send('call_join', { call_id: callId, chat_id: this.currentCall.chatId });
@@ -527,103 +461,31 @@ class WebCallService {
         }
         return;
       } else if (this.currentCall?.liveKitRoom && this.currentCall?.liveKitURL && this.currentCall?.liveKitToken) {
-        console.log('[LiveKit] Using pre-populated LiveKit for call');
+        console.log('[WebRTC] acceptCall: connecting to LiveKit room:', this.currentCall.liveKitRoom);
         await this.connectToLiveKitRoom(
           this.currentCall.liveKitRoom,
           this.currentCall.liveKitURL,
           this.currentCall.liveKitToken
         );
+        console.log('[WebRTC] acceptCall: LiveKit connected, sending call_accept');
 
         wsService.send('call_accept', { call_id: callId });
 
         if (this.currentCall) {
+          this.currentCall.isRinging = false;
           this.currentCall.isConnected = true;
           this.notifyStateChange();
         }
+        console.log('[WebRTC] acceptCall: call accepted and connected!');
         return;
-      }
-
-      // Use peer-to-peer WebRTC
-      if (!this.pc) {
-        console.log('[WebRTC] Creating peer connection');
-        this.pc = this.createPeerConnection();
-      }
-
-      console.log(`[WebRTC] Signaling state before setup: ${this.pc.signalingState}`);
-
-      if (this.pc.signalingState === 'stable' && this.currentCall?.offerSdp) {
-        console.log('[WebRTC] Applying remote offer SDP before accepting');
-        await this.pc.setRemoteDescription(new RTCSessionDescription({
-          type: 'offer',
-          sdp: this.currentCall.offerSdp
-        }));
-        console.log(`[WebRTC] Signaling state after remote desc: ${this.pc.signalingState}`);
-      }
-
-      if (!this.localStream) {
-        console.log('[WebRTC] Getting local media stream');
-        const isVideoCall = this.currentCall?.type === 'video';
-        
-        try {
-          console.log('[WebRTC] Requesting getUserMedia with video:', isVideoCall);
-          this.localStream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-            video: isVideoCall,
-          });
-          console.log('[WebRTC] Got local stream');
-        } catch (mediaError: any) {
-          console.error('[WebRTC] Media access error:', mediaError);
-          if (isVideoCall) {
-            console.warn('[WebRTC] Video access failed, falling back to audio-only:', mediaError.message);
-            try {
-              this.localStream = await navigator.mediaDevices.getUserMedia({
-                audio: true,
-                video: false,
-              });
-              if (this.currentCall) {
-                this.currentCall.type = 'audio';
-              }
-            } catch (audioError: any) {
-              console.error('[WebRTC] Audio access also failed:', audioError.message);
-              throw new Error('Не удалось получить доступ к микрофону и камере. Проверьте разрешения браузера.');
-            }
-          } else {
-            throw new Error('Не удалось получить доступ к микрофону. Проверьте разрешения браузера.');
-          }
-        }
-        
-        this.onLocalStreamCallbacks.forEach(cb => cb(this.localStream!));
-
-        this.localStream.getTracks().forEach(track => {
-          this.pc!.addTrack(track, this.localStream!);
+      } else {
+        console.error('[WebRTC] acceptCall: No LiveKit credentials available!', {
+          liveKitRoom: this.currentCall?.liveKitRoom,
+          liveKitURL: this.currentCall?.liveKitURL,
+          liveKitToken: this.currentCall?.liveKitToken ? 'present' : 'missing',
         });
+        throw new Error('Server did not provide LiveKit credentials.');
       }
-
-      console.log('[WebRTC] Sending call_accept signal');
-      wsService.send('call_accept', { call_id: callId });
-
-      if (this.currentCall) {
-        this.currentCall.isRinging = true;
-        this.notifyStateChange();
-      }
-
-      console.log('[WebRTC] Creating answer');
-      const answer = await this.pc.createAnswer();
-      console.log('[WebRTC] Setting local description');
-      await this.pc.setLocalDescription(answer);
-
-      console.log('[WebRTC] Sending call_answer with SDP');
-      wsService.send('call_answer', {
-        call_id: callId,
-        sdp: answer.sdp,
-      });
-
-      if (this.currentCall) {
-        this.currentCall.isRinging = false;
-        this.currentCall.isConnected = true;
-        this.notifyStateChange();
-      }
-      console.log('[WebRTC] Call accept completed successfully');
     } catch (error) {
       console.error('[WebRTC] Failed to accept call:', error);
       throw error;
@@ -645,15 +507,10 @@ class WebCallService {
 
   private cleanup() {
     this.localStream?.getTracks().forEach(track => track.stop());
-    this.remoteStream?.getTracks().forEach(track => track.stop());
     this.remoteStreams.forEach(stream => stream.getTracks().forEach(track => track.stop()));
     this.remoteStreams.clear();
 
     try {
-      if (this.pc) {
-        this.pc.close();
-      }
-      
       if (this.liveKitRoom) {
         this.liveKitRoom.disconnect();
         this.liveKitRoom = null;
@@ -663,9 +520,6 @@ class WebCallService {
     }
 
     this.localStream = null;
-    this.remoteStream = null;
-    this.pc = null;
-    this.pendingIceCandidates = [];
     this.currentCall = null;
 
     this.notifyStateChange();
@@ -699,52 +553,15 @@ class WebCallService {
       offerSdp: payload.sdp,
     };
 
-    // If LiveKit info is available, we'll use it in acceptCall instead of peer-to-peer
-    if (!payload.livekit) {
-      if (!this.pc) {
-        this.pc = this.createPeerConnection();
-      }
-      // We will apply the SDP in acceptCall to ensure it's fully awaited before createAnswer
-    }
-
+    // Wait for the user to answer via UI
     this.notifyStateChange();
   }
 
   private async handleAnswer(payload: any) {
-    if (!this.pc) return;
-
-    try {
-      await this.pc.setRemoteDescription(new RTCSessionDescription({
-        type: 'answer',
-        sdp: payload.sdp,
-      }));
-
-      if (this.currentCall) {
-        this.currentCall.isConnected = true;
-        this.notifyStateChange();
-      }
-    } catch (error) {
-      console.error('Failed to handle answer:', error);
-    }
-  }
-
-  private async handleIceCandidate(payload: any) {
-    if (!this.pc) return;
-
-    // Validate required fields
-    if (!payload.candidate || payload.sdp_mline_index === undefined || !payload.sdp_mid) {
-      console.error('Invalid ICE candidate payload', payload);
-      return;
-    }
-
-    try {
-      await this.pc.addIceCandidate(new RTCIceCandidate({
-        candidate: payload.candidate,
-        sdpMLineIndex: payload.sdp_mline_index,
-        sdpMid: payload.sdp_mid,
-      }));
-    } catch (error) {
-      console.error('Failed to add ICE candidate:', error);
+    if (this.currentCall) {
+      this.currentCall.isConnected = true;
+      this.currentCall.isRinging = false;
+      this.notifyStateChange();
     }
   }
 

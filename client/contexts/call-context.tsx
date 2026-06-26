@@ -23,46 +23,80 @@ interface CallProviderProps {
 
 export function CallProvider({ children }: CallProviderProps) {
   const [currentCall, setCurrentCall] = useState<CallState | null>(null);
-  const [callerName, setCallerName] = useState<string>('Пользователь');
+  const [displayName, setDisplayName] = useState<string>('Пользователь');
   const [isGroupCall, setIsGroupCall] = useState(false);
   const [showIncomingCall, setShowIncomingCall] = useState(false);
+  const [nameResolved, setNameResolved] = useState(false);
 
   useEffect(() => {
     const unsubscribe = callService.onStateChange((state: CallState | null) => {
       setCurrentCall(state);
       
-      // Show incoming call modal when receiving a call
       if (!state) {
         setShowIncomingCall(false);
-      } else if (!state.isCaller && !state.isConnected && !state.isRinging) {
-        setShowIncomingCall(true);
-        // Fetch caller info and chat info for group name
-        api.getUserById(state.callerId).then(res => {
-          if (res.data) {
-            const callerFullName = `${res.data.first_name} ${res.data.last_name}`;
-            // Also fetch chat info to check if it's a group call
-            if (state.chatId) {
-              api.getChatById(state.chatId).then(chatRes => {
-                if (chatRes.data && chatRes.data.type === 'group') {
-                  setIsGroupCall(true);
-                  setCallerName(chatRes.data.title || callerFullName);
-                } else {
+        setNameResolved(false);
+        setDisplayName('Пользователь');
+        return;
+      }
+      
+      // Resolve the name of the other participant
+      if (!nameResolved) {
+        // For caller: resolve callee's name; for callee: resolve caller's name
+        const otherUserId = state.isCaller ? state.calleeId : state.callerId;
+        
+        if (otherUserId) {
+          api.getUserById(otherUserId).then(res => {
+            if (res.data) {
+              const fullName = `${res.data.first_name} ${res.data.last_name}`;
+              // Check if it's a group call
+              if (state.chatId) {
+                api.getChatById(state.chatId).then(chatRes => {
+                  if (chatRes.data && chatRes.data.type === 'group') {
+                    setIsGroupCall(true);
+                    setDisplayName(chatRes.data.title || fullName);
+                  } else {
+                    setIsGroupCall(false);
+                    setDisplayName(fullName);
+                  }
+                  setNameResolved(true);
+                }).catch(() => {
                   setIsGroupCall(false);
-                  setCallerName(callerFullName);
-                }
-              }).catch(() => {
-                setIsGroupCall(false);
-                setCallerName(callerFullName);
-              });
-            } else {
-              setCallerName(callerFullName);
+                  setDisplayName(fullName);
+                  setNameResolved(true);
+                });
+              } else {
+                setDisplayName(fullName);
+                setNameResolved(true);
+              }
             }
+          }).catch(() => {
+            setNameResolved(true);
+          });
+        } else {
+          // No other user ID available (e.g. group call without callee)
+          if (state.chatId) {
+            api.getChatById(state.chatId).then(chatRes => {
+              if (chatRes.data && chatRes.data.type === 'group') {
+                setIsGroupCall(true);
+                setDisplayName(chatRes.data.title || 'Групповой звонок');
+              }
+              setNameResolved(true);
+            }).catch(() => {
+              setNameResolved(true);
+            });
+          } else {
+            setNameResolved(true);
           }
-        });
+        }
+      }
+      
+      // Show incoming call UI for non-caller
+      if (!state.isCaller && !state.isConnected && !state.isRinging) {
+        setShowIncomingCall(true);
       }
       
       // Hide incoming call modal when call is connected or ended
-      if (!state || state.isConnected || state.isEnded) {
+      if (state.isConnected || state.isEnded) {
         setShowIncomingCall(false);
       }
     });
@@ -70,7 +104,7 @@ export function CallProvider({ children }: CallProviderProps) {
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [nameResolved]);
 
   const handleAcceptCall = useCallback(async () => {
     console.log('Accept call pressed, currentCall:', currentCall);
@@ -113,7 +147,7 @@ export function CallProvider({ children }: CallProviderProps) {
         }}
         chatId={currentCall?.chatId || ''}
         calleeId={(currentCall?.isCaller ? currentCall.calleeId : currentCall?.callerId) || undefined}
-        calleeName={callerName}
+        calleeName={displayName}
         callType={currentCall?.type || 'audio'}
       />
     </CallContext.Provider>

@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		"026_scheduler_failures.sql",
 		"027_login_attempts.sql",
 		"029_two_factor_auth.sql",
+		"031_hybrid_mode_preference.sql",
 		"031_key_rotation.sql",
 		"031_move_password_to_credentials.sql",
 		"032_gdpr_consent.sql",

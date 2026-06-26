@@ -78,7 +78,65 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     }
   }, [expoPushToken]);
 
+  async function registerWebPush(): Promise<string | null> {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      console.log('Web Push is not supported in this browser');
+      return null;
+    }
+
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        console.log('Web Push permission denied');
+        return null;
+      }
+
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+
+      // Base64 to Uint8Array converter
+      const urlBase64ToUint8Array = (base64String: string) => {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+          outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+      };
+
+      const vapidPublicKey = 'BDxQrS09IYxG9Za7P2VJ4mRBi1yASey-8PqskldZypnoL_Rqu6EMMy1n7UWxXAjrpyQxzMuGtoj_7MONOnQUVXw';
+      
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
+
+      const subJSON = subscription.toJSON();
+      
+      // Register with backend
+      if (subJSON.endpoint && subJSON.keys) {
+        await api.registerWebPushSubscription({
+          endpoint: subJSON.endpoint,
+          key: subJSON.keys.p256dh,
+          auth: subJSON.keys.auth,
+        });
+        console.log('Web Push subscription registered successfully');
+      }
+
+      return 'web-push-registered';
+    } catch (error) {
+      console.error('Error registering web push:', error);
+      return null;
+    }
+  }
+
   async function registerForPushNotificationsAsync(): Promise<string | null> {
+    if (Platform.OS === 'web') {
+      return await registerWebPush();
+    }
+
     if (!Device.isDevice) {
       console.log('Must use physical device for push notifications');
       return null;
@@ -100,8 +158,6 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
     const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
     const token = await Notifications.getExpoPushTokenAsync({
       projectId,
-      // @ts-ignore
-      vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
     });
     return token.data;
   }

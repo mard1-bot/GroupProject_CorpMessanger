@@ -2,7 +2,6 @@ package notifications
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -43,12 +42,11 @@ func NewService(logger *slog.Logger, storage storage.Storage) (*Service, error) 
 
 	// Initialize Expo Push client
 	expoAPIKey := os.Getenv("EXPO_PUSH_API_KEY")
-	var expoPush *ExpoPushClient
+	expoPush := NewExpoPushClient(expoAPIKey, logger)
 	if expoAPIKey != "" {
-		expoPush = NewExpoPushClient(expoAPIKey, logger)
-		logger.Info("Expo Push API configured")
+		logger.Info("Expo Push API configured with API key")
 	} else {
-		logger.Warn("Expo Push API not configured")
+		logger.Info("Expo Push API configured in anonymous mode (no API key)")
 	}
 
 	// Email config from env
@@ -108,11 +106,15 @@ type NotificationPayload struct {
 }
 
 func (s *Service) SendToUser(ctx context.Context, userID uuid.UUID, payload *NotificationPayload) error {
+	s.logger.Info("SendToUser called", "user_id", userID, "title", payload.Title, "body", payload.Body)
+
 	// Get user notification settings
 	settings, err := s.storage.GetNotificationSettings(ctx, userID)
 	if err != nil {
+		s.logger.Error("SendToUser: failed to get settings", "error", err, "user_id", userID)
 		return fmt.Errorf("get settings: %w", err)
 	}
+	s.logger.Info("SendToUser: settings loaded", "user_id", userID, "settings_nil", settings == nil)
 
 	// Check quiet hours
 	if settings != nil && settings.QuietHoursEnabled && s.isQuietHours(settings) {
@@ -130,10 +132,14 @@ func (s *Service) SendToUser(ctx context.Context, userID uuid.UUID, payload *Not
 	}
 
 	// 1. Send Local/Push notification
+	s.logger.Info("SendToUser: checking push", "settings_nil", settings == nil, "push_enabled", settings == nil || settings.PushEnabled)
 	if settings == nil || settings.PushEnabled {
+		s.logger.Info("SendToUser: calling sendPush", "user_id", userID)
 		if err := s.sendPush(ctx, userID, payload); err != nil {
 			s.logger.Error("failed to send push", "error", err, "user_id", userID)
 		}
+	} else {
+		s.logger.Info("SendToUser: push disabled by settings", "user_id", userID)
 	}
 
 	// 2. Send Email if enabled and user offline > 5 min
@@ -206,26 +212,17 @@ func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *No
 		return fmt.Errorf("get web push subscriptions: %w", err)
 	}
 
+	s.logger.Info("sendWebPush called", "user_id", userID, "subscription_count", len(subs))
+
 	for _, sub := range subs {
-		// Decode base64 keys (client sends standard base64 with btoa())
-		key, err := base64.StdEncoding.DecodeString(sub.Key)
-		if err != nil {
-			s.logger.Error("decode web push key", "error", err)
-			continue
-		}
-
-		auth, err := base64.StdEncoding.DecodeString(sub.Auth)
-		if err != nil {
-			s.logger.Error("decode web push auth", "error", err)
-			continue
-		}
-
-		// Create webpush subscription
+		// Keys are stored as base64url strings from the browser PushManager.
+		// The webpush-go library expects base64url-encoded strings directly.
+		// Do NOT decode them to raw bytes.
 		webpushSub := &webpush.Subscription{
 			Endpoint: sub.Endpoint,
 			Keys: webpush.Keys{
-				P256dh: string(key),
-				Auth:   string(auth),
+				P256dh: sub.Key,
+				Auth:   sub.Auth,
 			},
 		}
 
@@ -243,9 +240,13 @@ func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *No
 			continue
 		}
 
+		s.logger.Info("Sending web push", "endpoint", sub.Endpoint[:50]+"...", "payload_size", len(messageBytes))
+
 		// Send notification
+		// Subscriber MUST be a mailto: URI, NOT the VAPID public key
 		resp, err := webpush.SendNotification(messageBytes, webpushSub, &webpush.Options{
-			Subscriber:      s.vapidPublicKey,
+			Subscriber:      "mailto:admin@finchgram.ru",
+			VAPIDPublicKey:  s.vapidPublicKey,
 			VAPIDPrivateKey: s.vapidPrivateKey,
 			TTL:             3600,
 		})
@@ -254,6 +255,9 @@ func (s *Service) sendWebPush(ctx context.Context, userID uuid.UUID, payload *No
 			s.logger.Error("webpush send failed", "error", err, "endpoint", sub.Endpoint)
 			continue
 		}
+		defer resp.Body.Close()
+
+		s.logger.Info("webpush response", "status", resp.StatusCode, "endpoint", sub.Endpoint[:50]+"...")
 
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 			s.logger.Warn("webpush returned non-success status", "status", resp.StatusCode)

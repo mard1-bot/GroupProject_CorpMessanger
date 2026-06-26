@@ -47,7 +47,6 @@ type CallOfferPayload struct {
 	CallerID uuid.UUID  `json:"caller_id"`
 	CalleeID *uuid.UUID `json:"callee_id,omitempty"`
 	Type     CallType   `json:"type"`
-	SDP      string     `json:"sdp"`
 }
 
 // CallJoinPayload represents a request to join an active call
@@ -58,15 +57,6 @@ type CallJoinPayload struct {
 // CallAnswerPayload represents a WebRTC answer
 type CallAnswerPayload struct {
 	CallID uuid.UUID `json:"call_id"`
-	SDP    string    `json:"sdp"`
-}
-
-// CallIcePayload represents an ICE candidate
-type CallIcePayload struct {
-	CallID        uuid.UUID `json:"call_id"`
-	Candidate     string    `json:"candidate"`
-	SDPMLineIndex int       `json:"sdp_mline_index"`
-	SDPMid        string    `json:"sdp_mid"`
 }
 
 // ActiveCall represents an ongoing call
@@ -335,11 +325,10 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 	}
 
 	callerPayload := map[string]interface{}{
-		"call_id": call.ID,
-		"chat_id": offer.ChatID,
-		"type":    offer.Type,
-				"is_group": isGroupCall,
-		"sdp":     offer.SDP,
+		"call_id":  call.ID,
+		"chat_id":  offer.ChatID,
+		"type":     offer.Type,
+		"is_group": isGroupCall,
 	}
 	if liveKitRoom != nil {
 		callerPayload["livekit"] = map[string]interface{}{
@@ -363,17 +352,16 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 				"chat_id":   offer.ChatID,
 				"caller_id": client.UserID,
 				"type":      offer.Type,
-								"is_group":   isGroupCall,
-				"sdp":       offer.SDP,
+				"is_group":  isGroupCall,
 			}
 			
-			// For 1-on-1 calls, generate tokens immediately
-			if liveKitRoom != nil && !isGroupCall {
+			// Generate tokens immediately for the participants
+			if liveKitRoom != nil {
 				calleeToken, err := h.liveKit.GenerateToken(roomName, pid.String())
 				if err == nil && calleeToken != "" {
 					calleePayload["livekit"] = map[string]interface{}{
 						"room_name": liveKitRoom.RoomName,
-						"url":       liveKitRoom.URL,
+						"url":       h.liveKitURL,
 						"token":     calleeToken,
 					}
 				}
@@ -383,6 +371,12 @@ func (h *Hub) HandleCallOffer(client *Client, payload []byte) {
 				Type:    EventCallOffer,
 				ChatID:  offer.ChatID,
 				Payload: calleePayload,
+			})
+
+			// Notify caller that the callee's device is ringing
+			h.sendToClient(client, &BroadcastMessage{
+				Type:   EventCallRinging,
+				ChatID: offer.ChatID,
 			})
 		}
 	}
@@ -467,46 +461,38 @@ func (h *Hub) HandleCallJoin(client *Client, payload []byte) {
 	log.Printf("[WebRTC] Client %s joined call %s", client.UserID, call.ID)
 }
 
-// HandleCallAnswer processes a call answer
-func (h *Hub) HandleCallAnswer(client *Client, payload []byte) {
-	var answer CallAnswerPayload
-	if err := json.Unmarshal(payload, &answer); err != nil {
-		log.Printf("[WebRTC] Invalid call answer: %v", err)
+// HandleCallAccept accepts a call
+func (h *Hub) HandleCallAccept(client *Client, payload []byte) {
+	var data struct {
+		CallID uuid.UUID `json:"call_id"`
+	}
+	if err := json.Unmarshal(payload, &data); err != nil {
+		log.Printf("[WebRTC] Invalid call accept: %v", err)
 		return
 	}
 
-	call := h.callManager.GetCall(answer.CallID)
+	call := h.callManager.GetCall(data.CallID)
 	if call == nil {
-		log.Printf("[WebRTC] Call not found: %s", answer.CallID)
 		return
 	}
 
 	// Check if already answered to prevent duplicate system messages
 	alreadyAnswered := call.Answered
 	if !alreadyAnswered {
-		h.callManager.MarkCallAsAnswered(answer.CallID)
+		h.callManager.MarkCallAsAnswered(data.CallID)
 	}
 
-	// Find the caller client
-	h.mu.RLock()
-	callerClient := h.userClients[call.CallerID]
-	h.mu.RUnlock()
+	// Notify caller that callee has answered
+	h.BroadcastToChat(&BroadcastMessage{
+		Type:   EventCallAnswer,
+		ChatID: call.ChatID,
+		Payload: map[string]interface{}{
+			"call_id": data.CallID,
+		},
+		ExcludeSender: &client.UserID,
+	})
 
-	if callerClient != nil {
-		// Send answer to specific caller
-		h.sendToClient(callerClient, &BroadcastMessage{
-			Type:   EventCallAnswer,
-			ChatID: call.ChatID,
-			Payload: map[string]interface{}{
-				"call_id": answer.CallID,
-				"sdp":     answer.SDP,
-			},
-		})
-	} else {
-		log.Printf("[WebRTC] Caller not online for answer: %s", call.CallerID)
-	}
-
-	log.Printf("[WebRTC] Call answer sent: %s (already_answered: %v)", answer.CallID, alreadyAnswered)
+	log.Printf("[WebRTC] Call answer sent: %s (already_answered: %v)", data.CallID, alreadyAnswered)
 
 	// Create system message only on first answer
 	if !alreadyAnswered {
@@ -515,57 +501,6 @@ func (h *Hub) HandleCallAnswer(client *Client, payload []byte) {
 				log.Printf("[WebRTC] Failed to create call accepted message: %v", err)
 			}
 		}()
-	}
-}
-
-// HandleCallIce processes ICE candidates
-func (h *Hub) HandleCallIce(client *Client, payload []byte) {
-	var ice CallIcePayload
-	if err := json.Unmarshal(payload, &ice); err != nil {
-		log.Printf("[WebRTC] Invalid ICE candidate: %v", err)
-		return
-	}
-
-	// Validate call_id
-	if ice.CallID == uuid.Nil {
-		log.Printf("[WebRTC] ICE candidate with empty call_id from user %s", client.UserID)
-		return
-	}
-
-	call := h.callManager.GetCall(ice.CallID)
-	if call == nil {
-		log.Printf("[WebRTC] Call not found for ICE: %s", ice.CallID)
-		return
-	}
-
-	// Determine target user (the other party in the call)
-	var targetUserID uuid.UUID
-	for participantID := range call.Participants {
-		if participantID != client.UserID {
-			targetUserID = participantID
-			break
-		}
-	}
-
-	// Find the target client
-	h.mu.RLock()
-	targetClient := h.userClients[targetUserID]
-	h.mu.RUnlock()
-
-	if targetClient != nil {
-		// Send ICE candidate to specific target
-		h.sendToClient(targetClient, &BroadcastMessage{
-			Type:   EventCallIce,
-			ChatID: call.ChatID,
-			Payload: map[string]interface{}{
-				"call_id":         ice.CallID,
-				"candidate":       ice.Candidate,
-				"sdp_mline_index": ice.SDPMLineIndex,
-				"sdp_mid":         ice.SDPMid,
-			},
-		})
-	} else {
-		log.Printf("[WebRTC] Target user not online for ICE: %s", targetUserID)
 	}
 }
 
@@ -637,32 +572,6 @@ func (h *Hub) HandleCallReject(client *Client, payload []byte) {
 			log.Printf("[WebRTC] Failed to create call rejected message: %v", err)
 		}
 	}()
-}
-
-// HandleCallAccept accepts a call (sends ringing)
-func (h *Hub) HandleCallAccept(client *Client, payload []byte) {
-	var data struct {
-		CallID uuid.UUID `json:"call_id"`
-	}
-	if err := json.Unmarshal(payload, &data); err != nil {
-		log.Printf("[WebRTC] Invalid call accept: %v", err)
-		return
-	}
-
-	call := h.callManager.GetCall(data.CallID)
-	if call == nil {
-		return
-	}
-
-	// Notify caller that callee is ringing
-	h.BroadcastToChat(&BroadcastMessage{
-		Type:   EventCallRinging,
-		ChatID: call.ChatID,
-		Payload: map[string]interface{}{
-			"call_id": data.CallID,
-		},
-		ExcludeSender: &client.UserID,
-	})
 }
 
 // HandleCallBusy sends busy signal

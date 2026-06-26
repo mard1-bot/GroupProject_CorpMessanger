@@ -45,10 +45,80 @@ class NotificationService {
     }
   }
 
+  async registerWebPush(): Promise<void> {
+    console.log('[Web Push] Starting registration process');
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      console.log('[Web Push] Error: Not supported in this browser');
+      return;
+    }
+
+    try {
+      console.log('[Web Push] Requesting permission...');
+      const permission = await Notification.requestPermission();
+      console.log('[Web Push] Permission result:', permission);
+      
+      if (permission !== 'granted') {
+        console.log('[Web Push] Error: Permission denied');
+        return;
+      }
+
+      console.log('[Web Push] Registering service worker /sw.js');
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      console.log('[Web Push] Waiting for service worker to be ready...');
+      await navigator.serviceWorker.ready;
+      console.log('[Web Push] Service worker ready');
+
+      const urlBase64ToUint8Array = (base64String: string) => {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+          outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+      };
+
+      const vapidPublicKey = 'BDxQrS09IYxG9Za7P2VJ4mRBi1yASey-8PqskldZypnoL_Rqu6EMMy1n7UWxXAjrpyQxzMuGtoj_7MONOnQUVXw';
+      
+      console.log('[Web Push] Checking for existing subscription...');
+      let subscription = await registration.pushManager.getSubscription();
+      
+      if (subscription) {
+        console.log('[Web Push] Unsubscribing from old subscription...');
+        await subscription.unsubscribe();
+      }
+
+      console.log('[Web Push] Subscribing to push manager with new key...');
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
+      console.log('[Web Push] Push manager subscribed');
+
+      const subJSON = subscription.toJSON();
+      console.log('[Web Push] Subscription JSON:', subJSON);
+      
+      if (subJSON.endpoint && subJSON.keys) {
+        console.log('[Web Push] Sending subscription to backend...');
+        await api.registerWebPushSubscription({
+          endpoint: subJSON.endpoint,
+          key: subJSON.keys.p256dh,
+          auth: subJSON.keys.auth,
+        });
+        console.log('[Web Push] Web Push subscription registered successfully');
+      } else {
+        console.log('[Web Push] Error: Invalid subscription JSON structure');
+      }
+    } catch (error) {
+      console.error('[Web Push] Error during registration:', error);
+    }
+  }
+
   async registerDeviceToken(): Promise<void> {
     try {
       if (Platform.OS === 'web') {
-        console.log('Web push notifications require Firebase configuration. Skipping for now.');
+        await this.registerWebPush();
         return;
       }
 
@@ -61,8 +131,6 @@ class NotificationService {
       const projectId = Constants.expoConfig?.extra?.eas?.projectId || 'messenger-app';
       const token = await Notifications.getExpoPushTokenAsync({
         projectId,
-        // @ts-ignore
-      vapidPublicKey: 'BNDRILYKeziLxERhD-fevCbrdKnJ7rTlBuvnImHQUg-d9jLYIJkMKXESxiXUY3ykWIbgEKgv6kO6qiZ17xyXoMo'
       });
 
       this.token = token.data;
@@ -70,7 +138,7 @@ class NotificationService {
       if (this.token && !this.isRegistered) {
         await api.registerDeviceToken({
           token: this.token,
-          platform: Platform.OS === 'web' ? 'web' : Platform.OS === 'ios' ? 'ios' : 'android',
+          platform: Platform.OS === 'ios' ? 'ios' : 'android',
           device_name: Platform.OS,
         });
         this.isRegistered = true;
